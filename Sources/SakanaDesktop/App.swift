@@ -101,7 +101,19 @@ struct SakanaApp: App {
             Divider()
 
             Button("About Sakana") {
-                NSApp.orderFrontStandardAboutPanel()
+                let alert = NSAlert()
+                alert.messageText = "Sakana"
+                alert.informativeText = """
+                A wiggly little desktop companion.
+
+                Inspired by the lovely characters from Yuri works 💕
+                and the wonderful sakana-widget project.
+
+                github.com/dsrkafuu/sakana-widget
+                """
+                alert.alertStyle = .informational
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
             }
 
             Divider()
