@@ -1,0 +1,12 @@
+format_version = 2
+
+[apps.SakanaDesktop]
+identifier = "com.fimars.sakana-desktop"
+product = "SakanaDesktop"
+version = "1.0.0"
+category = "public.app-category.entertainment"
+icon = "Sources/SakanaDesktop/Resources/AppIcon.icns"
+minimum_macos_version = "14.0"
+
+[apps.SakanaDesktop.plist]
+LSUIElement = true
