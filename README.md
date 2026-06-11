@@ -2,6 +2,8 @@
 
 A desktop pet for macOS — a little fish (or your own character) that sways and bounces on your screen. Inspired by [sakana-widget](https://github.com/dsrkafuu/sakana-widget).
 
+![Sakana widget](Assets/widget-screenshot.png)
+
 ## Features
 
 - Physics-based swaying animation with spring dynamics
