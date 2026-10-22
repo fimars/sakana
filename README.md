@@ -16,6 +16,8 @@ clicking it does not take the frontmost app's place.
 - Always-on-top or normal window level
 - Multi-screen placement
 - Drag-to-interact — grab and pull the character
+- Rest reminder — after 40 minutes of work a toast pops above the pet's head,
+  then the pet rests for 10 minutes; the message and both lengths are settings
 - Menu bar app with no Dock icon
 
 ## Requirements
@@ -61,6 +63,8 @@ Click the menu bar fish icon → **Settings…** (⌘,) to configure:
 
 - **Character Image** — choose a custom PNG/JPEG, or remove to use the default
 - **Window** — toggle always-on-top
+- **Rest Reminder** — toggle the reminder, set the toast message and the work
+  and rest lengths in minutes; edits apply as you make them
 - **Position** — pick a screen and drag the handle to set the distance from its
   bottom-right corner; **Apply** moves the pet
 
@@ -70,6 +74,7 @@ Settings live in `~/Library/Application Support/Sakana/settings.json`.
 
 - `main.go` — app lifecycle, the pet window, the menu bar item, wiring
 - `internal/pet` — spring physics, viewport metrics, the native-UI widget, image loading
+- `internal/reminder` — the work/rest reminder cycle and its timer
 - `internal/settings` — the settings store and the settings window
 - `internal/e2e`, `tools/e2e.sh` — the end-to-end harness
 - `tools/bench.sh`, `tools/bench.py` — the benchmark

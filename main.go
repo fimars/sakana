@@ -9,6 +9,7 @@ import (
 	"log"
 	"math"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/egoist/mygo"
@@ -16,7 +17,22 @@ import (
 
 	"github.com/fimars/sakana/internal/e2e"
 	"github.com/fimars/sakana/internal/pet"
+	"github.com/fimars/sakana/internal/reminder"
 	"github.com/fimars/sakana/internal/settings"
+)
+
+// The toast above the pet's head: the window it draws in, the gap between
+// it and the top of the pet's window, how long it shows, and its look.
+const (
+	toastWidth    = 380
+	toastHeight   = 84
+	toastGap      = 8
+	toastDuration = 4 * time.Second
+)
+
+var (
+	toastBackground = ui.RGBA(30, 34, 42, 0.94)
+	toastForeground = ui.RGB(255, 255, 255)
 )
 
 // app wires the pet, its settings and the menu bar together. Everything
@@ -28,6 +44,14 @@ type app struct {
 	settingsWin *mygo.Window
 	ui          *settings.UI
 	tray        *mygo.Tray
+	reminder    *reminder.Scheduler
+	// toastWin is the panel above the pet that shows the reminder, created
+	// when the first toast shows; toastText is what it says and toastGen
+	// tells the timer that hides it whether a newer toast took its place.
+	toastWin   *mygo.Window
+	toastText  string
+	toastGen   uint64
+	toastTimer *time.Timer
 	// quitting is set before the windows close, so the settings window lets
 	// itself close instead of hiding, and the app can quit.
 	quitting bool
@@ -99,6 +123,10 @@ func (a *app) setup() {
 	// A panel floats above every app; the setting may lower it to the
 	// normal level, as the Swift widget's "Always on Top" did.
 	a.petWin.SetAlwaysOnTop(a.store.AlwaysOnTop)
+	// The rest reminder runs on its own timer and draws nothing until a
+	// work phase ends, so starting it costs the first frame nothing.
+	a.reminder = reminder.New(a.reminderFired)
+	a.reminder.Apply(a.reminderConfig())
 	// The menu bar icon and the settings window are not on the way to the
 	// first frame: setup after this point is what the user waits for to see
 	// the pet, so the icon waits for the frame to reach the window.
@@ -117,11 +145,18 @@ func (a *app) setup() {
 		PetSize:          a.petSize,
 		Apply:            a.applyPosition,
 		ApplyAlwaysOnTop: a.applyAlwaysOnTop,
+		ApplyReminder:    a.applyReminder,
 		Redraw:           a.redraw,
 	}
 
-	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { a.quitting = true })
-	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { a.persistPosition() })
+	// Save where the pet sits while its window is still open: Mygo closes
+	// the windows before OnWillQuit, and a closed window's Bounds is zero.
+	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) {
+		a.quitting = true
+		a.persistPosition()
+		a.reminder.Stop()
+		a.clearToast()
+	})
 
 	if sock := os.Getenv("SAKANA_E2E_SOCK"); sock != "" {
 		if err := e2e.Start(sock, a); err != nil {
@@ -148,15 +183,17 @@ func (a *app) settingsWindow() *mygo.Window {
 	if a.settingsWin != nil {
 		return a.settingsWin
 	}
-	// UseContentSize: the Swift window had a 460×600 content rect, and the
-	// ported view needs that much room for the coordinate pad and Apply.
+	// UseContentSize: the Swift window had a 460×600 content rect; the
+	// ported view grew a rest reminder section and needs more room for the
+	// coordinate pad and Apply.
+	height := a.settingsHeight()
 	win := mygo.NewWindow(mygo.WindowOptions{
 		Title:          "Sakana Settings",
 		Width:          460,
-		Height:         600,
+		Height:         height,
 		UseContentSize: true,
 		MinWidth:       420,
-		MinHeight:      588, // a frame min, so about 560 DIPs of content
+		MinHeight:      height - 20, // a frame min, so about 48 DIPs less content
 		Hidden:         true,
 		Content:        ui.View(a.ui.View),
 	})
@@ -172,6 +209,17 @@ func (a *app) settingsWindow() *mygo.Window {
 	a.settingsWin = win
 	a.mark("settingsWindow")
 	return win
+}
+
+// settingsHeight is the settings window's content height: what the view
+// needs, or less on a display whose work area cannot hold it, where its
+// scroll container shows the rest.
+func (a *app) settingsHeight() int {
+	const want = 800
+	if wa := a.displayFor("").WorkArea; wa.Height > 0 {
+		return max(min(want, wa.Height-80), 480)
+	}
+	return want
 }
 
 // createTray creates the menu bar icon once the first frame is drawn, so
@@ -265,7 +313,178 @@ func (a *app) applyPosition(label string, offsetX, offsetY float64) {
 func (a *app) applyAlwaysOnTop(on bool) {
 	a.store.AlwaysOnTop = on
 	a.petWin.SetAlwaysOnTop(on)
+	if a.toastWin != nil {
+		a.toastWin.SetAlwaysOnTop(on)
+	}
 	a.saveStore()
+}
+
+// minutesToDuration turns the settings' minutes into a duration.
+func minutesToDuration(minutes float64) time.Duration {
+	if minutes <= 0 {
+		return 0
+	}
+	return time.Duration(min(minutes, settings.MaxReminderWorkMinutes) * float64(time.Minute))
+}
+
+// reminderConfig is the cycle the settings describe.
+func (a *app) reminderConfig() reminder.Config {
+	return reminder.Config{
+		Enabled: a.store.ReminderEnabled,
+		Work:    minutesToDuration(a.store.ReminderWorkMinutes),
+		Rest:    minutesToDuration(a.store.ReminderRestMinutes),
+		Text:    a.store.ReminderText,
+	}
+}
+
+// applyReminder stores the reminder settings and applies them: a change of
+// the cycle restarts it, while a change of the toast text alone leaves it
+// running. The settings window calls it as its fields change, after the
+// controls wrote the store, so the cycle's old shape comes from the
+// scheduler.
+func (a *app) applyReminder(enabled bool, text string, workMinutes, restMinutes float64) {
+	workMinutes = settings.ClampReminderMinutes(workMinutes, settings.DefaultReminderWorkMinutes, settings.MaxReminderWorkMinutes)
+	restMinutes = settings.ClampReminderMinutes(restMinutes, settings.DefaultReminderRestMinutes, settings.MaxReminderRestMinutes)
+	old := a.reminder.Snapshot().Config
+	a.store.ReminderEnabled = enabled
+	a.store.ReminderText = text
+	a.store.ReminderWorkMinutes = workMinutes
+	a.store.ReminderRestMinutes = restMinutes
+	a.saveStore()
+
+	cfg := a.reminderConfig()
+	if old.Enabled != cfg.Enabled || old.Work != cfg.Work || old.Rest != cfg.Rest {
+		a.reminder.Apply(cfg)
+		a.clearToast()
+		return
+	}
+	a.reminder.SetText(cfg.Text)
+}
+
+// reminderFired shows the toast; the scheduler calls it from its own
+// goroutine. The cycle may have been restarted or turned off while the
+// toast waited for the main thread, in which case it is not shown.
+func (a *app) reminderFired(text string) {
+	mygo.RunOnMain(func() {
+		if a.quitting {
+			return
+		}
+		if snap := a.reminder.Snapshot(); !snap.Enabled || snap.Phase != reminder.Rest {
+			return
+		}
+		a.showToast(text)
+	})
+}
+
+// showToast shows text in the panel above the pet's head for
+// toastDuration. The toast window is made the first time one shows.
+func (a *app) showToast(text string) {
+	if a.quitting || a.petWin == nil {
+		return
+	}
+	// A blank message would show an empty pill; keep the default instead.
+	// The store keeps what was typed, and Load fills it in when empty.
+	if text = strings.TrimSpace(text); text == "" {
+		text = settings.DefaultReminderText
+	}
+	a.ensureToastWindow()
+	a.toastText = text
+
+	b := a.petWin.Bounds()
+	wa := a.displayFor(a.store.ScreenLabel).WorkArea
+	x := b.X + b.Width/2 - toastWidth/2
+	y := b.Y - toastHeight - toastGap
+	if y < wa.Y {
+		// No room above the pet, as when it sits at the top of the screen:
+		// the toast goes below it instead.
+		y = b.Y + b.Height + toastGap
+	}
+	x = clampInt(x, wa.X, wa.X+wa.Width-toastWidth)
+	y = clampInt(y, wa.Y, wa.Y+wa.Height-toastHeight)
+	a.toastWin.SetBounds(mygo.Rectangle{X: x, Y: y, Width: toastWidth, Height: toastHeight})
+	a.toastWin.ShowInactive()
+	a.toastWin.Invalidate()
+	a.hideToastAfter(toastDuration)
+}
+
+// hideToastAfter hides the toast after d unless another one showed first.
+func (a *app) hideToastAfter(d time.Duration) {
+	a.toastGen++
+	gen := a.toastGen
+	if a.toastTimer != nil {
+		a.toastTimer.Stop()
+	}
+	a.toastTimer = time.AfterFunc(d, func() {
+		mygo.RunOnMain(func() {
+			if gen == a.toastGen {
+				a.clearToast()
+			}
+		})
+	})
+}
+
+// clearToast hides the toast, if one shows.
+func (a *app) clearToast() {
+	a.toastGen++
+	if a.toastTimer != nil {
+		a.toastTimer.Stop()
+		a.toastTimer = nil
+	}
+	if a.toastWin != nil {
+		a.toastWin.Hide()
+	}
+}
+
+// ensureToastWindow creates the toast panel when the first toast shows.
+func (a *app) ensureToastWindow() {
+	if a.toastWin != nil {
+		return
+	}
+	win := mygo.NewWindow(mygo.WindowOptions{
+		Title:             "Sakana Reminder",
+		Width:             toastWidth,
+		Height:            toastHeight,
+		Frameless:         true,
+		Transparent:       true,
+		Panel:             true,
+		DisableResize:     true,
+		DisableMinimize:   true,
+		DisableMaximize:   true,
+		DisableFullScreen: true,
+		DisableShadow:     true,
+		Hidden:            true,
+		Content:           ui.View(a.toastView),
+	})
+	// The toast follows the pet's window level, so turning always-on-top
+	// off keeps reminders behind the apps in front, as the pet is.
+	win.SetAlwaysOnTop(a.store.AlwaysOnTop)
+	// The toast is for reading: the pointer goes through it to whatever is
+	// below.
+	win.SetIgnoreMouseEvents(true)
+	a.toastWin = win
+}
+
+// toastView draws the bubble the reminder shows: the text on a dark rounded
+// background, centered in the transparent window.
+func (a *app) toastView(c *ui.Context) {
+	c.Root().Background(ui.Transparent)
+	ui.Box(c).Fill().Center().Children(func() {
+		ui.Box(c).Padding(10, 16).Radius(18).Background(toastBackground).Children(func() {
+			ui.Text(c, a.toastText).
+				FontSize(14).
+				TextColor(toastForeground).
+				TextAlign(ui.Center).
+				MaxLines(2)
+		})
+	})
+}
+
+// clampInt brings v into lo..hi.
+func clampInt(v, lo, hi int) int {
+	if hi < lo {
+		return lo
+	}
+	return min(max(v, lo), hi)
 }
 
 // pickImage shows the open panel off the main thread, then applies the
@@ -405,6 +624,15 @@ func (a *app) stateLocked() map[string]any {
 			},
 		})
 	}
+	snap := a.reminder.Snapshot()
+	toast := map[string]any{"visible": false, "text": a.toastText}
+	if a.toastWin != nil {
+		tb := a.toastWin.Bounds()
+		toast["visible"] = a.toastWin.IsVisible()
+		toast["bounds"] = map[string]any{
+			"x": tb.X, "y": tb.Y, "width": tb.Width, "height": tb.Height,
+		}
+	}
 	return map[string]any{
 		"pid":         os.Getpid(),
 		"bounds":      map[string]any{"x": b.X, "y": b.Y, "width": b.Width, "height": b.Height},
@@ -412,6 +640,16 @@ func (a *app) stateLocked() map[string]any {
 		"panel":       a.petWin.IsPanel(),
 		"alwaysOnTop": a.petWin.IsAlwaysOnTop(),
 		"settings":    a.store.Map(),
+		"reminder": map[string]any{
+			"enabled":     snap.Enabled,
+			"text":        snap.Text,
+			"workMinutes": snap.Work.Minutes(),
+			"restMinutes": snap.Rest.Minutes(),
+			"phase":       string(snap.Phase),
+			"remainingMs": snap.Remaining.Milliseconds(),
+			"shows":       snap.Shows,
+			"toast":       toast,
+		},
 		"metrics": map[string]float64{
 			"width": m.Width, "height": m.Height, "imageSize": m.ImageSize,
 			"rodLength": m.RodLength, "baseWidth": m.BaseWidth, "baseHeight": m.BaseHeight,
@@ -514,6 +752,27 @@ func (a *app) CaptureSettings() ([]byte, error) {
 			return
 		}
 		data, err = a.settingsWin.CapturePage()
+	})
+	return data, err
+}
+
+// SetReminder applies the rest reminder settings, as the settings window's
+// fields do.
+func (a *app) SetReminder(enabled bool, text string, workMinutes, restMinutes float64) error {
+	mygo.RunOnMain(func() { a.applyReminder(enabled, text, workMinutes, restMinutes) })
+	return nil
+}
+
+// CaptureToast returns a PNG of what the toast window shows.
+func (a *app) CaptureToast() ([]byte, error) {
+	var data []byte
+	var err error
+	mygo.RunOnMain(func() {
+		if a.toastWin == nil || !a.toastWin.IsVisible() {
+			err = errors.New("sakana: the toast is not showing")
+			return
+		}
+		data, err = a.toastWin.CapturePage()
 	})
 	return data, err
 }

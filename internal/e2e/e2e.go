@@ -49,6 +49,11 @@ type Hook interface {
 	CapturePage() ([]byte, error)
 	// SaveAndReloadSettings writes the settings and reads them back.
 	SaveAndReloadSettings() (before, after map[string]any, err error)
+	// SetReminder applies the rest reminder settings, as the settings
+	// window's fields do.
+	SetReminder(enabled bool, text string, workMinutes, restMinutes float64) error
+	// CaptureToast returns a PNG of what the reminder toast shows.
+	CaptureToast() ([]byte, error)
 	// ShowSettings opens the settings window as the menu bar item does.
 	ShowSettings() error
 	// CaptureSettings returns a PNG of what the settings window shows.
@@ -125,11 +130,13 @@ func Start(sock string, h Hook) error {
 	mux.HandleFunc("GET /native", s.native)
 	mux.HandleFunc("GET /capture", s.capturePet)
 	mux.HandleFunc("GET /settings/capture", s.captureSettings)
+	mux.HandleFunc("GET /toast/capture", s.captureToast)
 	mux.HandleFunc("POST /aot", s.aot)
 	mux.HandleFunc("POST /offsets", s.offsets)
 	mux.HandleFunc("POST /drag", s.drag)
 	mux.HandleFunc("POST /image", s.image)
 	mux.HandleFunc("POST /frame", s.frame)
+	mux.HandleFunc("POST /reminder", s.reminder)
 	mux.HandleFunc("POST /settings/open", s.settingsOpen)
 	mux.HandleFunc("POST /settings/reload", s.settingsReload)
 	mux.HandleFunc("POST /quit", s.quit)
@@ -196,6 +203,20 @@ func (s *server) captureSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stats, err := s.capture(name, s.h.CaptureSettings)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+func (s *server) captureToast(w http.ResponseWriter, r *http.Request) {
+	name, err := captureName(r, "toast")
+	if err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	stats, err := s.capture(name, s.h.CaptureToast)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -360,6 +381,28 @@ func (s *server) image(w http.ResponseWriter, r *http.Request) {
 func (s *server) frame(w http.ResponseWriter, _ *http.Request) {
 	s.h.RequestFrame()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// reminderRequest is what POST /reminder takes: the rest reminder settings,
+// in the minutes the settings window shows.
+type reminderRequest struct {
+	Enabled     bool    `json:"enabled"`
+	Text        string  `json:"text"`
+	WorkMinutes float64 `json:"workMinutes"`
+	RestMinutes float64 `json:"restMinutes"`
+}
+
+func (s *server) reminder(w http.ResponseWriter, r *http.Request) {
+	var req reminderRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("e2e: decode reminder settings: %w", err))
+		return
+	}
+	if err := s.h.SetReminder(req.Enabled, req.Text, req.WorkMinutes, req.RestMinutes); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": s.h.State()})
 }
 
 func (s *server) settingsOpen(w http.ResponseWriter, _ *http.Request) {

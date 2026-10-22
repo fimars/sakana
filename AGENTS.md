@@ -10,9 +10,9 @@
 - `go run .` — run from source
 - `go tool mygo build` — package `build/darwin-arm64/Sakana.app` and a `.dmg`
 - `tools/e2e.sh` — the test: builds, launches the app with `SAKANA_E2E_SOCK`,
-  asserts the window, viewport, spring, settings and image behavior, captures
-  PNGs, then packages the app and checks its bundle. Artifact:
-  `artifacts/e2e/report.md`.
+  asserts the window, viewport, spring, settings, image and rest reminder
+  behavior, captures PNGs, then packages the app and checks its bundle.
+  Artifact: `artifacts/e2e/report.md`.
 - `tools/bench.sh` — the benchmark: packages the app, launches it three times
   with a fresh userdata directory to time startup, then drives one running app
   to time the greeting sway, forced refreshes, the settings window, a character
@@ -74,7 +74,17 @@ delays the pet's appearance one-for-one.
 - A `Frameless` window on macOS is a titled `NSWindow` with a hidden title bar,
   not a borderless one: it has square corners.
 - The settings window is a normal window. Showing it activates the accessory
-  app, which is what lets its controls take the keyboard.
+  app, which is what lets its controls take the keyboard. It is 800 DIPs tall,
+  less when the display's work area is shorter, and its content scrolls when
+  the window cannot show all of it.
+- The rest reminder toast is a second non-activating panel, created when the
+  first toast shows. It follows the pet's always-on-top level, is click-through
+  (`Window.SetIgnoreMouseEvents`), and hides 4 s after it shows. A timer
+  goroutine runs the work/rest cycle (`internal/reminder`); only the toast
+  reaches the main thread, through `mygo.RunOnMain`.
+- `OnBeforeQuit` runs before Mygo closes the windows, and `OnWillQuit` after,
+  when a closed window's `Bounds` is the zero rectangle: the app saves the
+  pet's position and stops the reminder in `OnBeforeQuit`.
 - `Window.CapturePage` of a native-UI window can lose its text when another
   window paints a frame before the capture: scenes point at glyphs in the
   process-wide transient atlas, and the next frame frees them (Mygo 0.6.2). An
@@ -88,6 +98,7 @@ delays the pet's appearance one-for-one.
 - `main.go` — lifecycle, pet window, menu bar item, settings wiring, E2E hook
 - `internal/pet` — spring (`state.go`), viewport (`layout.go`), widget (`widget.go`),
   image (`image.go`), frame telemetry (`stats.go`)
+- `internal/reminder` — the work/rest reminder cycle (`scheduler.go`)
 - `internal/settings` — store (`store.go`) and settings window (`view.go`)
 - `internal/e2e` — control server for the harnesses (`/stats` and the process's CPU time in `stats.go`)
 - `tools/e2e.sh`, `tools/bench.sh` — the test and the benchmark

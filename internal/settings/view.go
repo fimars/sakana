@@ -41,6 +41,8 @@ type UI struct {
 	Apply func(screenLabel string, offsetX, offsetY float64)
 	// ApplyAlwaysOnTop applies the floating toggle.
 	ApplyAlwaysOnTop func(on bool)
+	// ApplyReminder applies the rest reminder fields as they change.
+	ApplyReminder func(enabled bool, text string, workMinutes, restMinutes float64)
 	// Redraw requests a frame of the settings and pet windows.
 	Redraw func()
 
@@ -174,18 +176,22 @@ func (u *UI) View(c *ui.Context) {
 	}
 	u.syncBounds()
 
-	ui.Column(c).Fill().Padding(16).Gap(16).Children(func() {
-		u.imageSection(c, t)
-		ui.Divider(c)
-		u.windowSection(c, t)
-		ui.Divider(c)
-		u.positionSection(c, t, options)
-		ui.Spacer(c)
-		ui.Row(c).Children(func() {
+	ui.Scroll(c).Grow(1).Children(func() {
+		ui.Column(c).Fill().Padding(16).Gap(16).Children(func() {
+			u.imageSection(c, t)
+			ui.Divider(c)
+			u.windowSection(c, t)
+			ui.Divider(c)
+			u.reminderSection(c, t)
+			ui.Divider(c)
+			u.positionSection(c, t, options)
 			ui.Spacer(c)
-			if ui.PrimaryButton(c, "Apply").Clicked() && u.Apply != nil {
-				u.Apply(u.screenLabel(), u.padX, u.padY)
-			}
+			ui.Row(c).Children(func() {
+				ui.Spacer(c)
+				if ui.PrimaryButton(c, "Apply").Clicked() && u.Apply != nil {
+					u.Apply(u.screenLabel(), u.padX, u.padY)
+				}
+			})
 		})
 	})
 }
@@ -232,6 +238,44 @@ func (u *UI) windowSection(c *ui.Context, t *ui.Theme) {
 			if u.ApplyAlwaysOnTop != nil {
 				u.ApplyAlwaysOnTop(u.Store.AlwaysOnTop)
 			}
+		}
+	})
+}
+
+// reminderSection holds the rest reminder: whether it runs, what the toast
+// says, and how long the work and rest phases last. Each edit applies as it
+// is made, as the always-on-top toggle does.
+func (u *UI) reminderSection(c *ui.Context, t *ui.Theme) {
+	ui.Column(c).Gap(8).Children(func() {
+		ui.Text(c, "Rest Reminder").Bold()
+		if u.Store == nil {
+			ui.Text(c, "Settings unavailable").FontSize(12).TextColor(t.TextMuted)
+			return
+		}
+		changed := ui.Checkbox(c, &u.Store.ReminderEnabled, "Remind me to rest").Changed()
+		ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+			ui.Text(c, "Message").FontSize(12).TextColor(t.TextMuted)
+			if ui.TextInput(c, &u.Store.ReminderText).Grow(1).Label("Message").Placeholder(DefaultReminderText).Changed() {
+				changed = true
+			}
+		})
+		ui.Row(c).Gap(16).AlignItems(ui.End).Children(func() {
+			numberField := func(label string, value *float64, hi float64) {
+				ui.Column(c).Gap(4).Children(func() {
+					ui.Text(c, label).FontSize(12).TextColor(t.TextMuted)
+					if ui.NumberInput(c, value, 1, hi, 1).Label(label).Changed() {
+						changed = true
+					}
+				})
+			}
+			numberField("Work (min)", &u.Store.ReminderWorkMinutes, MaxReminderWorkMinutes)
+			numberField("Rest (min)", &u.Store.ReminderRestMinutes, MaxReminderRestMinutes)
+		})
+		if changed && u.ApplyReminder != nil {
+			u.ApplyReminder(
+				u.Store.ReminderEnabled, u.Store.ReminderText,
+				u.Store.ReminderWorkMinutes, u.Store.ReminderRestMinutes,
+			)
 		}
 	})
 }

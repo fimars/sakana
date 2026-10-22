@@ -219,6 +219,14 @@ offsets = load('state-offsets.json', {}) or {}
 reload = load('reload.json', {}) or {}
 settings_capture = load('settings.json', {}) or {}
 settings_store = load('settings-store.json', {}) or {}
+reminder_toast = load('reminder-toast.json', {}) or {}
+reminder_hidden = load('reminder-hidden.json', {}) or {}
+toast_capture = load('toast-reminder.json', {}) or {}
+toast_long_capture = load('toast-reminder-long.json', {}) or {}
+reminder_reload = load('reload-reminder.json', {}) or {}
+reminder_final = load('state-reminder-final.json', {}) or {}
+reminder_loop = load('reminder-loop-state.json', {}) or {}
+settings_quit = load('settings-store-quit.json', {}) or {}
 
 
 def g(obj, *path, default=None):
@@ -412,6 +420,53 @@ lines.append('| save/reload after | `%s` |' % json.dumps(reload.get('after')))
 lines.append('| settings.json on disk | `%s` |' % json.dumps(settings_store))
 lines.append('')
 
+lines.append('## Rest reminder')
+lines.append('')
+rr = g(reminder_toast, 'reminder', default={}) or {}
+tb = g(rr, 'toast', 'bounds', default={}) or {}
+pet_b = g(reminder_toast, 'bounds', default={}) or {}
+toast_gap = pet_b.get('y', 0) - (tb.get('y', 0) + tb.get('height', 0))
+tc_bbox = toast_capture.get('opaqueBBox') or {}
+tl_bbox = toast_long_capture.get('opaqueBBox') or {}
+lines.append('| | value |')
+lines.append('|---|---|')
+lines.append('| defaults | on, 40 min work + 10 min rest, text **休息了！** |')
+lines.append('| accelerated cycle | work=%s min, rest=%s min |' % (
+    fmt(g(reminder_toast, 'reminder', 'workMinutes')), fmt(g(reminder_toast, 'reminder', 'restMinutes'))))
+lines.append('| toast bounds | %s |' % bbox(tb))
+lines.append('| pet window top | %s |' % fmt(pet_b.get('y')))
+lines.append('| toast gap above pet | %s DIPs |' % fmt(toast_gap))
+lines.append('| toast phase | %s |' % g(reminder_toast, 'reminder', 'phase'))
+lines.append('| toast capture | `%s`, %sx%s px, alphaZeroRatio=%s |' % (
+    toast_capture.get('path', 'n/a'), fmt(toast_capture.get('width')),
+    fmt(toast_capture.get('height')), fmt(toast_capture.get('alphaZeroRatio'))))
+lines.append('| toast bubble | %sx%s px at (%s,%s) |' % (
+    fmt(tc_bbox.get('width')), fmt(tc_bbox.get('height')),
+    fmt(tc_bbox.get('x')), fmt(tc_bbox.get('y'))))
+lines.append('| edited message bubble | %sx%s px, text **休息一下，喝口水吧！** |' % (
+    fmt(tl_bbox.get('width')), fmt(tl_bbox.get('height'))))
+lines.append('| toast lifetime | about %ss from shown to hidden (4 s expected) |' % (
+    facts.get('reminder_toast_seconds', 'n/a')))
+lines.append('| toasts in the fast loop | %s, phase %s |' % (
+    fmt(g(reminder_loop, 'reminder', 'shows')),
+    g(reminder_loop, 'reminder', 'phase')))
+lines.append('| frames idle before captures | %ss |' % (
+    facts.get('reminder_settle_seconds', 'n/a')))
+lines.append('| toast hidden | %s, rest phase has %ss left |' % (
+    g(reminder_hidden, 'reminder', 'toast', 'visible', default=True) is False,
+    fmt((g(reminder_hidden, 'reminder', 'remainingMs', default=0) or 0) // 1000)))
+lines.append('| final cycle | phase=%s, %ss left |' % (
+    g(reminder_final, 'reminder', 'phase'),
+    fmt((g(reminder_final, 'reminder', 'remainingMs', default=0) or 0) // 1000)))
+reminder_saved = g(reminder_reload, 'after', default={}) or {}
+lines.append('| saved reminder | `%s` |' % json.dumps(
+    {k: reminder_saved.get(k) for k in (
+        'reminderEnabled', 'reminderText', 'reminderWorkMinutes', 'reminderRestMinutes')},
+    ensure_ascii=False))
+lines.append('| offsets kept across quit | %s, %s |' % (
+    fmt(settings_quit.get('offsetX')), fmt(settings_quit.get('offsetY'))))
+lines.append('')
+
 lines.append('## Packaging')
 lines.append('')
 lines.append('| | value |')
@@ -517,6 +572,18 @@ fi
 fact app_binary "$BIN"
 
 step "launch the app"
+# A settings.json written before the rest reminder existed: the launch must
+# fill the new reminder fields with their defaults.
+cat >"$UD/settings.json" <<'JSON'
+{
+  "alwaysOnTop": false,
+  "screenLabel": "",
+  "offsetX": 64,
+  "offsetY": 64,
+  "imagePath": ""
+}
+JSON
+fact legacy_settings "yes"
 SAKANA_E2E_SOCK="$SOCK" SAKANA_E2E_USERDATA="$UD" SAKANA_E2E_ARTIFACTS="$ART" \
   "$BIN" >"$LOG" 2>&1 &
 APP_PID=$!
@@ -567,12 +634,18 @@ check_py "settings.defaults" "$ART/state.json" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 s = d["settings"]
-# Swift parity: a fresh settings store is not always-on-top and sits 64 DIPs
-# from the bottom-right corner of the primary display's work area.
-want = {"alwaysOnTop": False, "screenLabel": "", "offsetX": 64, "offsetY": 64, "imagePath": ""}
+# Swift parity: a settings store is not always-on-top and sits 64 DIPs from
+# the bottom-right corner of the primary display's work area. This one was
+# written before the rest reminder existed, so the reminder must default in
+# as on, at 40 minutes of work and 10 of rest.
+want = {
+    "alwaysOnTop": False, "screenLabel": "", "offsetX": 64, "offsetY": 64, "imagePath": "",
+    "reminderEnabled": True, "reminderText": "休息了！",
+    "reminderWorkMinutes": 40, "reminderRestMinutes": 10,
+}
 for key, value in want.items():
     assert s.get(key) == value, "settings.%s=%r, want %r" % (key, s.get(key), value)
-print("alwaysOnTop=false offsets=64,64 screenLabel='' imagePath=''")
+print("alwaysOnTop=false offsets=64,64 reminder=on 40/10 text=休息了！")
 PY
 
 check_py "bounds.matchMetrics" "$ART/state.json" <<'PY'
@@ -992,7 +1065,8 @@ check_py "settings.file" "$ART/settings-store.json" "$ART/reload.json" <<'PY'
 import json, sys
 store = json.load(open(sys.argv[1]))
 reload = json.load(open(sys.argv[2]))
-for key in ("alwaysOnTop", "screenLabel", "offsetX", "offsetY", "imagePath"):
+for key in ("alwaysOnTop", "screenLabel", "offsetX", "offsetY", "imagePath",
+            "reminderEnabled", "reminderText", "reminderWorkMinutes", "reminderRestMinutes"):
     assert store.get(key) == reload["after"].get(key), \
         "settings.json %s=%r != reload %r" % (key, store.get(key), reload["after"].get(key))
 assert store["offsetX"] == 100 and store["offsetY"] == 140, \
@@ -1026,6 +1100,375 @@ assert ratio is not None and ratio < 0.2, \
     "alphaZeroRatio=%r, want < 0.2 (mostly opaque settings UI)" % (ratio,)
 print("%d bytes, alphaZeroRatio=%.3f, %dx%d px" % (
     d["bytes"], ratio, d["width"], d["height"]))
+PY
+
+step "rest reminder defaults and toast"
+check_py "reminder.defaults" "$ART/state.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+s, r = d["settings"], d["reminder"]
+assert s["reminderEnabled"] is True, s
+assert s["reminderText"] == "休息了！", s
+assert s["reminderWorkMinutes"] == 40 and s["reminderRestMinutes"] == 10, s
+assert r["phase"] == "work", r
+assert abs(r["remainingMs"] - 40 * 60 * 1000) < 10000, "remainingMs=%r" % (r["remainingMs"],)
+assert r["toast"]["visible"] is False, r["toast"]
+print("reminder on, 40/10 min, text=休息了！, phase=work, toast hidden")
+PY
+
+# A capture can lose its glyphs when another window paints a frame before
+# reading it (Mygo 0.6.2). The image swap above re-kicked the pet, so wait
+# until it stops drawing frames and nothing else animates while a toast is
+# captured.
+SETTLE_START=$SECONDS
+PET_RESTING=0
+PREV_FRAMES=""
+while ((SECONDS - SETTLE_START < 20)); do
+  http_json GET /stats "$ART/reminder-settle-stats.json"
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    CUR_FRAMES=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["frames"]["total"])' "$ART/reminder-settle-stats.json")
+    if [[ -n "$PREV_FRAMES" && "$CUR_FRAMES" == "$PREV_FRAMES" ]]; then
+      PET_RESTING=1
+      break
+    fi
+    PREV_FRAMES=$CUR_FRAMES
+  fi
+  sleep 0.3
+done
+fact reminder_settle_seconds "$((SECONDS - SETTLE_START))"
+if ((PET_RESTING == 1)); then
+  pass "reminder.pet.resting" "no frames drawn over 0.3s before the toast captures ($((SECONDS - SETTLE_START))s)"
+else
+  fail "reminder.pet.resting" "the app kept drawing frames 20s before the toast captures"
+fi
+
+# A launch starts a 40 minute work phase; run the cycle fast enough to see
+# it: 1.2 s of work, then a long rest so no second toast starts while the
+# first one is checked.
+reminder_post() { # NAME JSONFILE OUTFILE
+  local name=$1 jsonfile=$2 outfile=$3
+  http_json POST /reminder "$outfile" -H 'Content-Type: application/json' --data-binary "@$jsonfile"
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    pass "$name" "POST /reminder -> 200"
+    return 0
+  fi
+  fail "$name" "POST /reminder -> HTTP $HTTP_STATUS: $(head -c 200 "$outfile" 2>/dev/null | tr '\n' ' ')"
+  return 1
+}
+
+printf '{"enabled":true,"text":"休息了！","workMinutes":0.02,"restMinutes":5}\n' >"$ART/reminder-fast.json"
+reminder_post "reminder.apply" "$ART/reminder-fast.json" "$ART/reminder-apply.json" || true
+
+check_py "reminder.apply.state" "$ART/reminder-apply.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d.get("ok") is True, d
+r, s = d["state"]["reminder"], d["state"]["settings"]
+assert r["phase"] == "work", r
+assert 500 <= r["remainingMs"] <= 1300, "accelerated work phase has %rms" % (r["remainingMs"],)
+assert s["reminderEnabled"] is True and s["reminderText"] == "休息了！", s
+assert s["reminderWorkMinutes"] == 0.02 and s["reminderRestMinutes"] == 5, s
+print("cycle restarted with 1.2 s of work (remaining %dms), 5 minutes of rest" % r["remainingMs"])
+PY
+
+step "rest reminder toast above the pet"
+TOAST_VISIBLE=0
+TOAST_SHOWN_AT=""
+TOAST_DEADLINE=$((SECONDS + 5))
+while ((SECONDS < TOAST_DEADLINE)); do
+  http_json GET /state "$ART/reminder-toast.json"
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    if python3 - "$ART/reminder-toast.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["reminder"]["toast"].get("visible") else 1)
+PY
+    then
+      TOAST_SHOWN_AT=$(python3 -c 'import time; print(time.time())')
+      TOAST_VISIBLE=1
+      break
+    fi
+  fi
+  sleep 0.05
+done
+if ((TOAST_VISIBLE == 1)); then
+  pass "reminder.toast.shown" "toast visible within 5s of a 1.2s work phase"
+else
+  fail "reminder.toast.shown" "no toast 5s after the work phase ended: $(head -c 200 "$ART/reminder-toast.json" 2>/dev/null | tr '\n' ' ')"
+fi
+
+check_py "reminder.toast.placement" "$ART/reminder-toast.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+r, pet = d["reminder"], d["bounds"]
+t = r["toast"]
+b = t["bounds"]
+wa = next(x for x in d["displays"] if x.get("primary"))["workArea"]
+assert r["phase"] == "rest", r
+assert t["visible"] is True, t
+assert t["text"] == "休息了！", t
+top = b["y"] + b["height"]
+assert top <= pet["y"], "toast (%r) is not above the pet (%r)" % (b, pet)
+gap = pet["y"] - top
+assert 0 < gap <= 20, "toast gap above the pet is %d DIPs" % gap
+center_toast = b["x"] + b["width"] / 2
+center_pet = pet["x"] + pet["width"] / 2
+assert abs(center_toast - center_pet) <= 2, "toast center %g != pet center %g" % (center_toast, center_pet)
+assert b["x"] >= wa["x"] and b["x"] + b["width"] <= wa["x"] + wa["width"], \
+    "toast %r leaves the work area %r" % (b, wa)
+assert b["y"] >= wa["y"] and b["y"] + b["height"] <= wa["y"] + wa["height"], \
+    "toast %r leaves the work area %r" % (b, wa)
+print("toast %dx%d at (%d,%d), %d DIPs above the pet, centered, inside the work area" % (
+    b["width"], b["height"], b["x"], b["y"], gap))
+PY
+
+sleep 0.2
+TOAST_RETRIES=0
+while ((TOAST_RETRIES < 25)); do
+  http_json GET "/toast/capture?name=toast-reminder" "$ART/toast-reminder.json"
+  [[ "$HTTP_STATUS" == "200" ]] && break
+  TOAST_RETRIES=$((TOAST_RETRIES + 1))
+  sleep 0.1
+done
+if [[ "$HTTP_STATUS" == "200" ]]; then
+  pass "reminder.toast.capture" "GET /toast/capture -> $(tr -d '\n ' <"$ART/toast-reminder.json" | head -c 200)"
+else
+  fail "reminder.toast.capture" "no toast capture: HTTP $HTTP_STATUS $(head -c 200 "$ART/toast-reminder.json" 2>/dev/null)"
+fi
+
+check_py "reminder.toast.capture.bubble" "$ART/toast-reminder.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d.get("width", 0) > 0 and d.get("height", 0) > 0, d
+ratio = d.get("alphaZeroRatio")
+assert ratio is not None and 0.5 < ratio < 0.99, "alphaZeroRatio=%r" % (ratio,)
+for name, alpha in (d.get("cornerAlphas") or {}).items():
+    assert alpha == 0, "corner %s alpha=%r, want 0" % (name, alpha)
+b = d.get("opaqueBBox") or {}
+assert b.get("width", 0) >= 80 and b.get("height", 0) >= 30, \
+    "the toast bubble is too small: %r" % (b,)
+assert b["width"] < d["width"] and b["height"] < d["height"], \
+    "the whole toast capture is opaque: %r" % (b,)
+center = b["x"] + b["width"] / 2
+assert abs(center - d["width"] / 2) <= 3, "bubble center %g != capture center %g" % (
+    center, d["width"] / 2)
+print("%dx%d px capture, bubble %dx%d at (%d,%d), alphaZeroRatio=%.3f" % (
+    d["width"], d["height"], b["width"], b["height"], b["x"], b["y"], ratio))
+PY
+
+step "rest reminder hides the toast"
+HIDE_START=$SECONDS
+TOAST_HIDDEN=0
+TOAST_HIDDEN_AT=""
+while ((SECONDS - HIDE_START < 8)); do
+  http_json GET /state "$ART/reminder-hidden.json"
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    if python3 - "$ART/reminder-hidden.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if not d["reminder"]["toast"].get("visible") else 1)
+PY
+    then
+      TOAST_HIDDEN_AT=$(python3 -c 'import time; print(time.time())')
+      TOAST_HIDDEN=1
+      break
+    fi
+  fi
+  sleep 0.1
+done
+if ((TOAST_HIDDEN == 1)); then
+  pass "reminder.toast.hidden" "toast hid after about $((SECONDS - HIDE_START))s"
+else
+  fail "reminder.toast.hidden" "toast still visible 8s after it showed: $(head -c 200 "$ART/reminder-hidden.json" 2>/dev/null | tr '\n' ' ')"
+fi
+if [[ -n "$TOAST_SHOWN_AT" && -n "$TOAST_HIDDEN_AT" ]]; then
+  TOAST_SECONDS=$(python3 -c "print('%.2f' % (float('$TOAST_HIDDEN_AT') - float('$TOAST_SHOWN_AT')))")
+  fact reminder_toast_seconds "$TOAST_SECONDS"
+  if python3 -c "import sys; sys.exit(0 if 2.5 <= $TOAST_SECONDS <= 5.5 else 1)"; then
+    pass "reminder.toast.lifetime" "${TOAST_SECONDS}s from shown to hidden (4s expected)"
+  else
+    fail "reminder.toast.lifetime" "${TOAST_SECONDS}s from shown to hidden, want about 4s"
+  fi
+fi
+
+check_py "reminder.toast.hidden.state" "$ART/reminder-hidden.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+r = d["reminder"]
+assert r["toast"]["visible"] is False, r["toast"]
+assert r["phase"] == "rest", r
+assert r["remainingMs"] > 4 * 60 * 1000, "rest has only %rms left" % (r["remainingMs"],)
+print("toast hidden; rest phase has %ds left" % (r["remainingMs"] // 1000))
+PY
+
+step "rest reminder message editing"
+printf '{"enabled":true,"text":"休息一下，喝口水吧！","workMinutes":0.02,"restMinutes":4}\n' >"$ART/reminder-long.json"
+reminder_post "reminder.message.apply" "$ART/reminder-long.json" "$ART/reminder-message.json" || true
+
+check_py "reminder.message.state" "$ART/reminder-message.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+r, s = d["state"]["reminder"], d["state"]["settings"]
+assert r["phase"] == "work", r
+assert r["text"] == "休息一下，喝口水吧！", r
+assert s["reminderText"] == "休息一下，喝口水吧！", s
+print("a new message applies to the cycle: %s" % r["text"])
+PY
+
+TOAST_VISIBLE=0
+TOAST_DEADLINE=$((SECONDS + 5))
+while ((SECONDS < TOAST_DEADLINE)); do
+  http_json GET /state "$ART/reminder-toast-long.json"
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    if python3 - "$ART/reminder-toast-long.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["reminder"]["toast"].get("visible") else 1)
+PY
+    then
+      TOAST_VISIBLE=1
+      break
+    fi
+  fi
+  sleep 0.05
+done
+if ((TOAST_VISIBLE == 1)); then
+  pass "reminder.message.toast" "the edited message shows in the toast"
+else
+  fail "reminder.message.toast" "no toast with the edited message within 5s"
+fi
+
+sleep 0.2
+TOAST_RETRIES=0
+while ((TOAST_RETRIES < 25)); do
+  http_json GET "/toast/capture?name=toast-reminder-long" "$ART/toast-reminder-long.json"
+  [[ "$HTTP_STATUS" == "200" ]] && break
+  TOAST_RETRIES=$((TOAST_RETRIES + 1))
+  sleep 0.1
+done
+if [[ "$HTTP_STATUS" == "200" ]]; then
+  pass "reminder.message.capture" "GET /toast/capture -> $(tr -d '\n ' <"$ART/toast-reminder-long.json" | head -c 200)"
+else
+  fail "reminder.message.capture" "no toast capture for the edited message: HTTP $HTTP_STATUS $(head -c 200 "$ART/toast-reminder-long.json" 2>/dev/null)"
+fi
+
+check_py "reminder.message.longer" "$ART/toast-reminder-long.json" "$ART/toast-reminder.json" <<'PY'
+import json, sys
+long = json.load(open(sys.argv[1]))
+short = json.load(open(sys.argv[2]))
+lb, sb = long.get("opaqueBBox") or {}, short.get("opaqueBBox") or {}
+assert lb and sb, "missing bubble boxes: %r / %r" % (lb, sb)
+assert lb["width"] >= sb["width"] * 1.5, \
+    "the longer message bubble is %dpx wide, the short one %dpx" % (lb["width"], sb["width"])
+print("longer message bubble %dpx wide vs %dpx for 休息了！" % (lb["width"], sb["width"]))
+PY
+
+step "rest reminder repeats"
+# 1.2 s of work and 1.2 s of rest: the second toast comes 2.4 s after the
+# first, and state.reminder.shows counts the toasts the cycle has shown.
+printf '{"enabled":true,"text":"休息了！","workMinutes":0.02,"restMinutes":0.02}\n' >"$ART/reminder-loop.json"
+reminder_post "reminder.loop.apply" "$ART/reminder-loop.json" "$ART/reminder-loop-apply.json" || true
+LOOP_SHOWS=0
+LOOP_DEADLINE=$((SECONDS + 8))
+while ((SECONDS < LOOP_DEADLINE)); do
+  http_json GET /state "$ART/reminder-loop-state.json"
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    if python3 - "$ART/reminder-loop-state.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["reminder"]["shows"] >= 2 else 1)
+PY
+    then
+      LOOP_SHOWS=1
+      break
+    fi
+  fi
+  sleep 0.05
+done
+if ((LOOP_SHOWS == 1)); then
+  pass "reminder.loop" "a second toast shows after the rest phase"
+else
+  fail "reminder.loop" "no second toast within 8s of a 1.2s work/rest cycle: $(head -c 200 "$ART/reminder-loop-state.json" 2>/dev/null | tr '\n' ' ')"
+fi
+
+check_py "reminder.loop.state" "$ART/reminder-loop-state.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+r = d["reminder"]
+assert r["enabled"] is True, r
+assert r["phase"] in ("work", "rest"), r
+assert r["shows"] >= 2, "the cycle showed %r toasts" % (r["shows"],)
+print("the cycle repeats: %d toasts, phase %s" % (r["shows"], r["phase"]))
+PY
+
+step "rest reminder off and on"
+printf '{"enabled":false,"text":"该休息啦！","workMinutes":25,"restMinutes":5}\n' >"$ART/reminder-off.json"
+reminder_post "reminder.off.apply" "$ART/reminder-off.json" "$ART/reminder-off-response.json" || true
+check_py "reminder.off.state" "$ART/reminder-off-response.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+r, s = d["state"]["reminder"], d["state"]["settings"]
+assert s["reminderEnabled"] is False, s
+assert r["phase"] == "off" and r["remainingMs"] == 0, r
+assert r["toast"]["visible"] is False, r["toast"]
+print("the reminder is off: phase=off, no toast")
+PY
+
+printf '{"enabled":true,"text":"该休息啦！","workMinutes":25,"restMinutes":5}\n' >"$ART/reminder-on.json"
+reminder_post "reminder.on.apply" "$ART/reminder-on.json" "$ART/reminder-on-response.json" || true
+check_py "reminder.on.state" "$ART/reminder-on-response.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+r, s = d["state"]["reminder"], d["state"]["settings"]
+assert s["reminderEnabled"] is True, s
+assert s["reminderText"] == "该休息啦！" and s["reminderWorkMinutes"] == 25, s
+assert r["phase"] == "work", r
+assert 24 * 60 * 1000 <= r["remainingMs"] <= 25 * 60 * 1000 + 3000, \
+    "25 minute work phase has %rms" % (r["remainingMs"],)
+assert r["toast"]["visible"] is False, r["toast"]
+print("the reminder is on again: 25 minutes of work, %ds left" % (r["remainingMs"] // 1000))
+PY
+
+step "rest reminder persistence"
+request_ok "reminder.reload" POST /settings/reload "$ART/reload-reminder.json" || true
+check_py "reminder.reload" "$ART/reload-reminder.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d.get("same") is True, "settings did not round-trip: before=%r after=%r" % (
+    d.get("before"), d.get("after"))
+after = d["after"]
+assert after["reminderEnabled"] is True, after
+assert after["reminderText"] == "该休息啦！", after
+assert after["reminderWorkMinutes"] == 25 and after["reminderRestMinutes"] == 5, after
+print("reminder settings round-trip: %s" % json.dumps(
+    {k: after[k] for k in ("reminderEnabled", "reminderText",
+                           "reminderWorkMinutes", "reminderRestMinutes")},
+    ensure_ascii=False))
+PY
+
+cp "$UD/settings.json" "$ART/settings-store-reminder.json"
+check_py "reminder.file" "$ART/settings-store-reminder.json" <<'PY'
+import json, sys
+store = json.load(open(sys.argv[1]))
+assert store["reminderEnabled"] is True, store
+assert store["reminderText"] == "该休息啦！", store
+assert store["reminderWorkMinutes"] == 25 and store["reminderRestMinutes"] == 5, store
+print("settings.json holds the reminder: %s" % json.dumps(
+    {k: store[k] for k in ("reminderEnabled", "reminderText",
+                           "reminderWorkMinutes", "reminderRestMinutes")},
+    ensure_ascii=False))
+PY
+
+state_get "state.reminder.final" "$ART/state-reminder-final.json"
+check_py "reminder.final.state" "$ART/state-reminder-final.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+r = d["reminder"]
+assert r["phase"] == "work", r
+assert 24 * 60 * 1000 <= r["remainingMs"] <= 25 * 60 * 1000, \
+    "final work phase has %rms" % (r["remainingMs"],)
+assert r["toast"]["visible"] is False, r["toast"]
+print("final state: work phase with %ds left, toast hidden" % (r["remainingMs"] // 1000))
 PY
 
 step "quit the app"
@@ -1074,6 +1517,24 @@ if pgrep -f "$BIN" >/dev/null 2>&1; then
 else
   pass "app.noLeftovers" "no process left behind"
 fi
+
+step "settings survive the quit"
+# OnWillQuit runs after Mygo closed the windows, where Bounds is zero; the
+# saved offsets must still be the ones applied before the quit.
+cp "$UD/settings.json" "$ART/settings-store-quit.json"
+check_py "settings.quit.offsets" "$ART/settings-store-quit.json" <<'PY'
+import json, sys
+store = json.load(open(sys.argv[1]))
+assert store["offsetX"] == 100 and store["offsetY"] == 140, \
+    "offsets after quit are %r,%r, want 100,140" % (store["offsetX"], store["offsetY"])
+assert store["reminderEnabled"] is True, store
+assert store["reminderText"] == "该休息啦！", store
+assert store["reminderWorkMinutes"] == 25 and store["reminderRestMinutes"] == 5, store
+print("settings.json after quit keeps offsets 100,140 and the reminder: %s" % json.dumps(
+    {k: store[k] for k in ("offsetX", "offsetY", "reminderEnabled", "reminderText",
+                           "reminderWorkMinutes", "reminderRestMinutes")},
+    ensure_ascii=False))
+PY
 
 step "package the app"
 rm -rf "$APP_BUNDLE"
