@@ -1,0 +1,156 @@
+package pet
+
+import (
+	"math"
+	"time"
+
+	"github.com/egoist/mygo/ui"
+)
+
+// The rod and the base, as Swift drew them: gray at half and at two
+// fifths opacity.
+var (
+	rodColor  = ui.RGBA(128, 128, 128, 0.5)
+	baseColor = ui.RGBA(128, 128, 128, 0.4)
+)
+
+// Widget draws the character on its rod over a transparent window, and
+// swings it as the pointer pulls.
+//
+// It is the Swift widget's SakanaWidgetView, its animator and its viewport
+// layout in one: View builds a frame from the spring's state, and the
+// spring steps by the time between frames.
+type Widget struct {
+	bitmap  *ui.Bitmap
+	metrics Metrics
+	state   *State
+
+	last time.Time
+	// dragging is whether the pointer is pulling the character, and dragX
+	// and dragY how far it has pulled it from where the press began.
+	dragging     bool
+	dragX, dragY float64
+}
+
+// NewWidget returns a widget showing b, kicked off so it greets the user
+// with a sway.
+func NewWidget(b *ui.Bitmap) *Widget {
+	w := &Widget{bitmap: b}
+	w.SetBitmap(b)
+	return w
+}
+
+// Bitmap returns the character image.
+func (w *Widget) Bitmap() *ui.Bitmap { return w.bitmap }
+
+// State returns the spring, for the app and for tests.
+func (w *Widget) State() *State { return w.state }
+
+// Metrics returns the viewport the current character needs.
+func (w *Widget) Metrics() Metrics { return w.metrics }
+
+// SetBitmap shows b instead of the current character, and re-kicks the
+// spring as changing the image did.
+func (w *Widget) SetBitmap(b *ui.Bitmap) {
+	w.bitmap = b
+	size := 120.0
+	if b != nil {
+		bw, bh := b.Size()
+		size = PreferredImageSize(bw, bh)
+	}
+	w.metrics = MetricsFor(size)
+	w.state = NewState(size)
+	w.state.Kick()
+	w.last = time.Time{}
+	w.dragging = false
+	w.dragX, w.dragY = 0, 0
+}
+
+// Drag pulls the character by dx, dy DIPs from where the press began.
+func (w *Widget) Drag(dx, dy float64) {
+	w.state.Drag(dx, dy)
+}
+
+// View builds one frame. It is the Swift widget's body and its display
+// link's tick: a press and drag set the spring's swing, and between drags
+// time advances it, until it comes to rest and no frames are asked for.
+func (w *Widget) View(c *ui.Context) {
+	now := c.Now()
+	var dt time.Duration
+	if !w.last.IsZero() {
+		dt = now.Sub(w.last)
+	}
+	w.last = now
+
+	// The window is transparent: everything but the rod, the base and the
+	// character must show what is behind it.
+	c.Root().Background(ui.Transparent)
+
+	// The full-window surface takes the pointer and paints the rod and the
+	// base; the character is its child, drawn above them.
+	surface := ui.Box(c).Fill()
+	dx, dy, pressed := surface.Dragged()
+	if pressed {
+		if !w.dragging {
+			// The first frame of a press starts the drag where it began,
+			// as SwiftUI's DragGesture translation did.
+			w.dragging = true
+			w.dragX, w.dragY = 0, 0
+		}
+		w.dragX += float64(dx)
+		w.dragY += float64(dy)
+		w.state.Drag(w.dragX, w.dragY)
+	} else {
+		// Released: the spring takes over from where the drag left it.
+		w.dragging = false
+		w.state.Step(dt)
+	}
+
+	m := w.metrics
+	midX := m.MidX()
+	baseTopY := m.BaseTopY()
+	rad := w.state.R * math.Pi / 180
+	attachX := float32(midX + math.Sin(rad)*m.RodLength)
+	attachY := float32(baseTopY - math.Cos(rad)*m.RodLength + w.state.Y*m.RodVerticalScale)
+
+	// Draw paints on the window, in DIPs, and may run more than once a
+	// frame, so it only paints what the frame's numbers say.
+	surface.Draw(func(p *ui.Painter, _ ui.Rect) {
+		var rod ui.Path
+		rod.MoveTo(float32(midX), float32(baseTopY))
+		rod.LineTo(attachX, attachY)
+		// Swift stroked the rod with a butt cap; Mygo strokes paths with
+		// round ones. At 2 DIPs the ends are hidden by the base and the
+		// character, so the two look the same.
+		p.StrokePath(&rod, 2, rodColor)
+		p.Fill(ui.Rect{
+			X: float32(midX - m.BaseWidth/2),
+			Y: float32(baseTopY),
+			W: float32(m.BaseWidth),
+			H: float32(m.BaseHeight),
+		}, baseColor, 4)
+	})
+
+	if w.bitmap != nil {
+		s := float32(m.ImageSize)
+		surface.Children(func() {
+			// The character's bottom center hangs from the rod's end, and
+			// it turns around that point, as rotationEffect(anchor: .bottom)
+			// did. PassThrough lets a press on the character reach the
+			// surface that drags it: a plain image would take the pointer.
+			ui.Image(c, w.bitmap).
+				Size(s, s).
+				Absolute().
+				Left(attachX-s/2).
+				Top(attachY-s).
+				TransformOrigin(0.5, 1).
+				Rotate(float32(w.state.R)).
+				PassThrough()
+		})
+	}
+
+	// Frames only while something moves: Mygo idles at 0 fps at rest.
+	if w.dragging || !w.state.Resting() {
+		c.AnimationFrame()
+	}
+}
