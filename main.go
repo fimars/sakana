@@ -22,17 +22,18 @@ import (
 )
 
 // The toast above the pet's head: the window it draws in, the gap between
-// it and the top of the pet's window, how long it shows, and its look.
+// it and the top of the pet's window, and its look. The toast stays up
+// until the pointer clicks it.
 const (
-	toastWidth    = 380
-	toastHeight   = 84
-	toastGap      = 8
-	toastDuration = 4 * time.Second
+	toastWidth  = 380
+	toastHeight = 84
+	toastGap    = 8
 )
 
 var (
 	toastBackground = ui.RGBA(30, 34, 42, 0.94)
 	toastForeground = ui.RGB(255, 255, 255)
+	toastCloseMark  = ui.RGBA(255, 255, 255, 0.55)
 )
 
 // app wires the pet, its settings and the menu bar together. Everything
@@ -46,12 +47,9 @@ type app struct {
 	tray        *mygo.Tray
 	reminder    *reminder.Scheduler
 	// toastWin is the panel above the pet that shows the reminder, created
-	// when the first toast shows; toastText is what it says and toastGen
-	// tells the timer that hides it whether a newer toast took its place.
-	toastWin   *mygo.Window
-	toastText  string
-	toastGen   uint64
-	toastTimer *time.Timer
+	// when the first toast shows; toastText is what its bubble says.
+	toastWin  *mygo.Window
+	toastText string
 	// quitting is set before the windows close, so the settings window lets
 	// itself close instead of hiding, and the app can quit.
 	quitting bool
@@ -376,8 +374,9 @@ func (a *app) reminderFired(text string) {
 	})
 }
 
-// showToast shows text in the panel above the pet's head for
-// toastDuration. The toast window is made the first time one shows.
+// showToast shows text in the panel above the pet's head. The toast window
+// is made the first time one shows, and a toast already up takes the new
+// text.
 func (a *app) showToast(text string) {
 	if a.quitting || a.petWin == nil {
 		return
@@ -404,32 +403,10 @@ func (a *app) showToast(text string) {
 	a.toastWin.SetBounds(mygo.Rectangle{X: x, Y: y, Width: toastWidth, Height: toastHeight})
 	a.toastWin.ShowInactive()
 	a.toastWin.Invalidate()
-	a.hideToastAfter(toastDuration)
-}
-
-// hideToastAfter hides the toast after d unless another one showed first.
-func (a *app) hideToastAfter(d time.Duration) {
-	a.toastGen++
-	gen := a.toastGen
-	if a.toastTimer != nil {
-		a.toastTimer.Stop()
-	}
-	a.toastTimer = time.AfterFunc(d, func() {
-		mygo.RunOnMain(func() {
-			if gen == a.toastGen {
-				a.clearToast()
-			}
-		})
-	})
 }
 
 // clearToast hides the toast, if one shows.
 func (a *app) clearToast() {
-	a.toastGen++
-	if a.toastTimer != nil {
-		a.toastTimer.Stop()
-		a.toastTimer = nil
-	}
 	if a.toastWin != nil {
 		a.toastWin.Hide()
 	}
@@ -458,24 +435,54 @@ func (a *app) ensureToastWindow() {
 	// The toast follows the pet's window level, so turning always-on-top
 	// off keeps reminders behind the apps in front, as the pet is.
 	win.SetAlwaysOnTop(a.store.AlwaysOnTop)
-	// The toast is for reading: the pointer goes through it to whatever is
-	// below.
-	win.SetIgnoreMouseEvents(true)
 	a.toastWin = win
 }
 
-// toastView draws the bubble the reminder shows: the text on a dark rounded
-// background, centered in the transparent window.
+// toastView draws the reminder: the text and a close mark on a dark rounded
+// bubble, centered in the transparent window. A click anywhere on the toast
+// dismisses it, which the X makes plain to see.
 func (a *app) toastView(c *ui.Context) {
 	c.Root().Background(ui.Transparent)
-	ui.Box(c).Fill().Center().Children(func() {
-		ui.Box(c).Padding(10, 16).Radius(18).Background(toastBackground).Children(func() {
+	surface := ui.Box(c).Fill().Center()
+	surface.Children(func() {
+		bubble := ui.ButtonBase(c).
+			Padding(8, 14).
+			Radius(18).
+			Background(toastBackground).
+			AlignItems(ui.Center).
+			Gap(10).
+			Label("Dismiss reminder")
+		bubble.Children(func() {
 			ui.Text(c, a.toastText).
 				FontSize(14).
 				TextColor(toastForeground).
-				TextAlign(ui.Center).
-				MaxLines(2)
+				MaxLines(2).
+				MaxWidth(toastWidth - 120)
+			closeMark(c)
 		})
+		if bubble.Clicked() {
+			a.clearToast()
+		}
+	})
+	// The bubble's margins are part of the window too: a click there
+	// dismisses the toast rather than doing nothing.
+	if surface.Clicked() {
+		a.clearToast()
+	}
+}
+
+// closeMark draws the X at the right of the toast bubble. Painter.Line only
+// paints axis-aligned segments, so the diagonals are a stroked path.
+func closeMark(c *ui.Context) {
+	mark := ui.Box(c).Size(18, 18).Shrink(0)
+	mark.Draw(func(p *ui.Painter, r ui.Rect) {
+		cx, cy := r.X+r.W/2, r.Y+r.H/2
+		var x ui.Path
+		x.MoveTo(cx-3.5, cy-3.5)
+		x.LineTo(cx+3.5, cy+3.5)
+		x.MoveTo(cx+3.5, cy-3.5)
+		x.LineTo(cx-3.5, cy+3.5)
+		p.StrokePath(&x, 1.5, toastCloseMark)
 	})
 }
 
@@ -775,6 +782,19 @@ func (a *app) CaptureToast() ([]byte, error) {
 		data, err = a.toastWin.CapturePage()
 	})
 	return data, err
+}
+
+// ShowToast shows a toast now, for the E2E harness and for looking at a
+// reminder without waiting for a phase to end.
+func (a *app) ShowToast(text string) error {
+	mygo.RunOnMain(func() { a.showToast(text) })
+	return nil
+}
+
+// DismissToast hides the toast, as a click on it does.
+func (a *app) DismissToast() error {
+	mygo.RunOnMain(func() { a.clearToast() })
+	return nil
 }
 
 func (a *app) Quit() { mygo.App.Quit() }

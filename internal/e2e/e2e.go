@@ -54,6 +54,10 @@ type Hook interface {
 	SetReminder(enabled bool, text string, workMinutes, restMinutes float64) error
 	// CaptureToast returns a PNG of what the reminder toast shows.
 	CaptureToast() ([]byte, error)
+	// ShowToast shows a reminder toast at once, for its look.
+	ShowToast(text string) error
+	// DismissToast hides the toast, as a click on it does.
+	DismissToast() error
 	// ShowSettings opens the settings window as the menu bar item does.
 	ShowSettings() error
 	// CaptureSettings returns a PNG of what the settings window shows.
@@ -131,6 +135,8 @@ func Start(sock string, h Hook) error {
 	mux.HandleFunc("GET /capture", s.capturePet)
 	mux.HandleFunc("GET /settings/capture", s.captureSettings)
 	mux.HandleFunc("GET /toast/capture", s.captureToast)
+	mux.HandleFunc("POST /toast/show", s.toastShow)
+	mux.HandleFunc("POST /toast/dismiss", s.toastDismiss)
 	mux.HandleFunc("POST /aot", s.aot)
 	mux.HandleFunc("POST /offsets", s.offsets)
 	mux.HandleFunc("POST /drag", s.drag)
@@ -222,6 +228,32 @@ func (s *server) captureToast(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, stats)
+}
+
+// toastRequest is what POST /toast/show takes.
+type toastRequest struct {
+	Text string `json:"text"`
+}
+
+func (s *server) toastShow(w http.ResponseWriter, r *http.Request) {
+	var req toastRequest
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, fmt.Errorf("e2e: decode toast: %w", err))
+		return
+	}
+	if err := s.h.ShowToast(req.Text); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": s.h.State()})
+}
+
+func (s *server) toastDismiss(w http.ResponseWriter, _ *http.Request) {
+	if err := s.h.DismissToast(); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "state": s.h.State()})
 }
 
 // capture saves what fn captured under the artifacts directory, as

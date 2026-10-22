@@ -16,8 +16,9 @@ clicking it does not take the frontmost app's place.
 - Always-on-top or normal window level
 - Multi-screen placement
 - Drag-to-interact — grab and pull the character
-- Rest reminder — after 40 minutes of work a toast pops above the pet's head,
-  then the pet rests for 10 minutes; the message and both lengths are settings
+- Rest reminder — after 40 minutes of work a toast pops above the pet's head
+  and waits until clicked; then the pet rests for 10 minutes; the message and
+  both lengths are settings
 - Menu bar app with no Dock icon
 
 ## Requirements

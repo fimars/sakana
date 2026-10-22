@@ -226,6 +226,7 @@ toast_long_capture = load('toast-reminder-long.json', {}) or {}
 reminder_reload = load('reload-reminder.json', {}) or {}
 reminder_final = load('state-reminder-final.json', {}) or {}
 reminder_loop = load('reminder-loop-state.json', {}) or {}
+reminder_still_up = load('reminder-still-up.json', {}) or {}
 settings_quit = load('settings-store-quit.json', {}) or {}
 
 
@@ -445,8 +446,8 @@ lines.append('| toast bubble | %sx%s px at (%s,%s) |' % (
     fmt(tc_bbox.get('x')), fmt(tc_bbox.get('y'))))
 lines.append('| edited message bubble | %sx%s px, text **休息一下，喝口水吧！** |' % (
     fmt(tl_bbox.get('width')), fmt(tl_bbox.get('height'))))
-lines.append('| toast lifetime | about %ss from shown to hidden (4 s expected) |' % (
-    facts.get('reminder_toast_seconds', 'n/a')))
+lines.append('| toast persists | %s after 5 s, then dismissed through POST /toast/dismiss |' % (
+    "still visible" if g(reminder_still_up, 'reminder', 'toast', 'visible', default=False) else "not visible"))
 lines.append('| toasts in the fast loop | %s, phase %s |' % (
     fmt(g(reminder_loop, 'reminder', 'shows')),
     g(reminder_loop, 'reminder', 'phase')))
@@ -1173,7 +1174,6 @@ PY
 
 step "rest reminder toast above the pet"
 TOAST_VISIBLE=0
-TOAST_SHOWN_AT=""
 TOAST_DEADLINE=$((SECONDS + 5))
 while ((SECONDS < TOAST_DEADLINE)); do
   http_json GET /state "$ART/reminder-toast.json"
@@ -1184,7 +1184,6 @@ d = json.load(open(sys.argv[1]))
 sys.exit(0 if d["reminder"]["toast"].get("visible") else 1)
 PY
     then
-      TOAST_SHOWN_AT=$(python3 -c 'import time; print(time.time())')
       TOAST_VISIBLE=1
       break
     fi
@@ -1256,11 +1255,32 @@ print("%dx%d px capture, bubble %dx%d at (%d,%d), alphaZeroRatio=%.3f" % (
     d["width"], d["height"], b["width"], b["height"], b["x"], b["y"], ratio))
 PY
 
-step "rest reminder hides the toast"
-HIDE_START=$SECONDS
+step "rest reminder stays until dismissed"
+# The toast does not go away by itself: it is still up 5 s after it showed,
+# past the old 4 s timeout, and a click dismisses it.
+sleep 5
+http_json GET /state "$ART/reminder-still-up.json"
+if [[ "$HTTP_STATUS" == "200" ]]; then
+  if python3 - "$ART/reminder-still-up.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if d["reminder"]["toast"].get("visible") else 1)
+PY
+  then
+    pass "reminder.toast.stays" "toast is still up 5 s after it showed"
+  else
+    fail "reminder.toast.stays" "toast was gone 5 s after it showed: $(head -c 200 "$ART/reminder-still-up.json" 2>/dev/null | tr '\n' ' ')"
+  fi
+else
+  fail "reminder.toast.stays" "GET /state -> HTTP $HTTP_STATUS"
+fi
+
+# A click on the toast dismisses it; the harness calls the control API the
+# click runs.
+request_ok "reminder.toast.dismiss" POST /toast/dismiss "$ART/reminder-dismiss.json" || true
 TOAST_HIDDEN=0
-TOAST_HIDDEN_AT=""
-while ((SECONDS - HIDE_START < 8)); do
+HIDE_START=$SECONDS
+while ((SECONDS - HIDE_START < 3)); do
   http_json GET /state "$ART/reminder-hidden.json"
   if [[ "$HTTP_STATUS" == "200" ]]; then
     if python3 - "$ART/reminder-hidden.json" <<'PY'
@@ -1269,7 +1289,6 @@ d = json.load(open(sys.argv[1]))
 sys.exit(0 if not d["reminder"]["toast"].get("visible") else 1)
 PY
     then
-      TOAST_HIDDEN_AT=$(python3 -c 'import time; print(time.time())')
       TOAST_HIDDEN=1
       break
     fi
@@ -1277,18 +1296,9 @@ PY
   sleep 0.1
 done
 if ((TOAST_HIDDEN == 1)); then
-  pass "reminder.toast.hidden" "toast hid after about $((SECONDS - HIDE_START))s"
+  pass "reminder.toast.hidden" "toast hidden after POST /toast/dismiss"
 else
-  fail "reminder.toast.hidden" "toast still visible 8s after it showed: $(head -c 200 "$ART/reminder-hidden.json" 2>/dev/null | tr '\n' ' ')"
-fi
-if [[ -n "$TOAST_SHOWN_AT" && -n "$TOAST_HIDDEN_AT" ]]; then
-  TOAST_SECONDS=$(python3 -c "print('%.2f' % (float('$TOAST_HIDDEN_AT') - float('$TOAST_SHOWN_AT')))")
-  fact reminder_toast_seconds "$TOAST_SECONDS"
-  if python3 -c "import sys; sys.exit(0 if 2.5 <= $TOAST_SECONDS <= 5.5 else 1)"; then
-    pass "reminder.toast.lifetime" "${TOAST_SECONDS}s from shown to hidden (4s expected)"
-  else
-    fail "reminder.toast.lifetime" "${TOAST_SECONDS}s from shown to hidden, want about 4s"
-  fi
+  fail "reminder.toast.hidden" "toast still visible 3s after POST /toast/dismiss: $(head -c 200 "$ART/reminder-hidden.json" 2>/dev/null | tr '\n' ' ')"
 fi
 
 check_py "reminder.toast.hidden.state" "$ART/reminder-hidden.json" <<'PY'

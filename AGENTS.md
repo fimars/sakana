@@ -78,10 +78,13 @@ delays the pet's appearance one-for-one.
   less when the display's work area is shorter, and its content scrolls when
   the window cannot show all of it.
 - The rest reminder toast is a second non-activating panel, created when the
-  first toast shows. It follows the pet's always-on-top level, is click-through
-  (`Window.SetIgnoreMouseEvents`), and hides 4 s after it shows. A timer
-  goroutine runs the work/rest cycle (`internal/reminder`); only the toast
-  reaches the main thread, through `mygo.RunOnMain`.
+  first toast shows. It follows the pet's always-on-top level, stays up until
+  the pointer clicks it (the X, or anywhere on it), and is not click-through:
+  a click on its transparent margins dismisses it too. A settings change that
+  restarts the cycle, or quitting, hides it. The E2E harness dismisses it with
+  `POST /toast/dismiss`. A timer goroutine runs the work/rest cycle
+  (`internal/reminder`); only the toast reaches the main thread, through
+  `mygo.RunOnMain`.
 - `OnBeforeQuit` runs before Mygo closes the windows, and `OnWillQuit` after,
   when a closed window's `Bounds` is the zero rectangle: the app saves the
   pet's position and stops the reminder in `OnBeforeQuit`.
