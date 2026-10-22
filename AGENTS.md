@@ -13,10 +13,33 @@
   asserts the window, viewport, spring, settings and image behavior, captures
   PNGs, then packages the app and checks its bundle. Artifact:
   `artifacts/e2e/report.md`.
+- `tools/bench.sh` — the benchmark: packages the app, launches it three times
+  with a fresh userdata directory to time startup, then drives one running app
+  to time the greeting sway, forced refreshes, the settings window, a character
+  swap, and what the app holds at rest and while it sways. Artifact:
+  `artifacts/bench/report.md`, in integer milliseconds; raw values in
+  `artifacts/bench/bench.json`.
 
 Mygo is pinned to v0.6.2 in `go.mod`; its API is 0.x and moves fast, so read the
 release notes before upgrading. There are no unit tests: the E2E script is the
-test.
+test, and the benchmark only measures.
+
+Both harnesses run under `caffeinate`: Mygo holds a window's frames while
+nothing shows it, so a sleeping display freezes the pet mid-sway and the
+checks see a stopped app. `tools/bench.sh` also runs the scenario app with
+Always on Top on, because at the default window level the front app covers the
+pet and the sway pauses.
+
+## Startup
+
+The pet is on screen about 130–190 ms after the process starts on this machine,
+and nearly all of that is Mygo/AppKit init (~75–90 ms to `WhenReady`) and the
+first pet window (~50 ms), before any of this app's code runs. Keep setup off
+the way to the first frame: the pet window is created first, the settings
+window is created on its first open (`app.settingsWindow`), and the menu bar
+icon is created from `Window.OnReadyToShow`, which runs after the first frame
+reaches the window (`app.createTray`). Anything done in `setup` before that
+delays the pet's appearance one-for-one.
 
 ## Mygo notes for this app
 
@@ -29,9 +52,22 @@ test.
   level with `Window.SetAlwaysOnTop(false)`.
 - Native UI shows the desktop through the window only when the root is
   transparent: `c.Root().Background(ui.Transparent)`.
-- `Window.Update` and `Window.Invalidate` post to the main thread. Widget state
-  is read and written on the main thread only; goroutines (the E2E handlers, the
-  file dialog) go through `mygo.RunOnMain`.
+- `Window.Update` and `Window.Invalidate` post to the main thread and return
+  before the frame is built. Widget state is read and written on the main
+  thread only; goroutines (the E2E handlers, the file dialog) go through
+  `mygo.RunOnMain`.
+- A frame runs `Widget.View` at most once unless a pass consumed input, and not
+  at all for a paint-only frame. The widget counts a frame when `Context.Now()`
+  advances (`internal/pet/stats.go`), and `GET /stats` exposes the counters with
+  the app's startup phases, the process CPU time and its heap.
+- A window whose content nothing shows has its frames held, and the display
+  link is paused at rest: an occluded pet draws nothing and an idle app uses no
+  CPU. The greeting sway runs once per launch (and per character change) and
+  takes about 10 s to come to rest at 100 fps; while it runs Mygo keeps the
+  frame it drew, so the app's footprint is higher until the pet rests.
+- A spring at rest is not stepped: its residual motion is below `Resting`'s
+  threshold but stepping it from a redraw's frame would turn it back into a
+  short swing. `Widget.View` only steps a spring that is still moving.
 - Click-through is whole-window only (`Window.SetIgnoreMouseEvents`); there is
   no per-region hit testing. The pet window is sized to the character's bounding
   box, so its transparent margins are small.
@@ -50,6 +86,8 @@ test.
 ## Structure
 
 - `main.go` — lifecycle, pet window, menu bar item, settings wiring, E2E hook
-- `internal/pet` — spring (`state.go`), viewport (`layout.go`), widget (`widget.go`), image (`image.go`)
+- `internal/pet` — spring (`state.go`), viewport (`layout.go`), widget (`widget.go`),
+  image (`image.go`), frame telemetry (`stats.go`)
 - `internal/settings` — store (`store.go`) and settings window (`view.go`)
-- `internal/e2e` — control server for `tools/e2e.sh`
+- `internal/e2e` — control server for the harnesses (`/stats` and the process's CPU time in `stats.go`)
+- `tools/e2e.sh`, `tools/bench.sh` — the test and the benchmark

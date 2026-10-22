@@ -29,6 +29,9 @@ type Hook interface {
 	// State is the app's state to check: the pet window's bounds, the
 	// spring's, the viewport's and the settings'.
 	State() map[string]any
+	// Stats is the app's startup phases and frame telemetry, which the
+	// benchmark harness measures with the process's own statistics.
+	Stats() map[string]any
 	// NativeWindow returns the pet window's NSWindow*.
 	NativeWindow() uintptr
 	// SetAlwaysOnTop applies the floating toggle.
@@ -118,6 +121,7 @@ func Start(sock string, h Hook) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", s.health)
 	mux.HandleFunc("GET /state", s.state)
+	mux.HandleFunc("GET /stats", s.stats)
 	mux.HandleFunc("GET /native", s.native)
 	mux.HandleFunc("GET /capture", s.capturePet)
 	mux.HandleFunc("GET /settings/capture", s.captureSettings)
@@ -151,6 +155,15 @@ func (s *server) health(w http.ResponseWriter, _ *http.Request) {
 
 func (s *server) state(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, s.h.State())
+}
+
+func (s *server) stats(w http.ResponseWriter, r *http.Request) {
+	out := s.h.Stats()
+	withMem, _ := boolParam(r, "mem")
+	for key, value := range processStats(withMem) {
+		out[key] = value
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *server) native(w http.ResponseWriter, _ *http.Request) {

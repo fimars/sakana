@@ -12,6 +12,13 @@
 # The human-readable result is artifacts/e2e/report.md.
 set -euo pipefail
 
+# The pet animates and the harness captures its window: a sleeping display
+# occludes the window, Mygo holds its frames, and the checks see a frozen
+# app. Keep the display awake for the run.
+if [[ -z "${SAKANA_E2E_AWAKE:-}" ]] && command -v caffeinate >/dev/null 2>&1; then
+  SAKANA_E2E_AWAKE=1 exec caffeinate -dimsu "$0" "$@"
+fi
+
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$REPO_ROOT"
 
@@ -864,6 +871,24 @@ worst = max(abs(p[k]) for k in ("r", "y", "t", "w"))
 assert worst < 0.1, "spring not at rest: %r" % (p,)
 print("|r|,|y|,|t|,|w| all below 0.1: %s" % ", ".join(
     "%s=%g" % (k, p[k]) for k in ("r", "y", "t", "w")))
+PY
+
+step "rest draws no frames"
+# Mygo idles at 0 fps when nothing moves: the pet window asking for no
+# frame is what keeps the app's CPU at zero while it sits on the screen.
+# The drag just asked for frames; wait for them to be drawn first.
+sleep 0.5
+request_ok "idle.stats.before" GET /stats "$ART/stats-idle-before.json" || true
+sleep 0.3
+request_ok "idle.stats.after" GET /stats "$ART/stats-idle-after.json" || true
+check_py "idle.noFrames" "$ART/stats-idle-after.json" "$ART/stats-idle-before.json" <<'PY'
+import json, sys
+after = json.load(open(sys.argv[1]))["frames"]
+before = json.load(open(sys.argv[2]))["frames"]
+assert before.get("idleAt"), "the widget drew no frame at rest: %r" % (before,)
+assert after["total"] == before["total"], \
+    "frames kept coming at rest: %d -> %d in 300 ms" % (before["total"], after["total"])
+print("frames stay at %d over 300 ms; idleAt is set" % after["total"])
 PY
 
 step "apply a generated character image"

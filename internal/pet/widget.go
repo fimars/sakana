@@ -21,9 +21,10 @@ var (
 // layout in one: View builds a frame from the spring's state, and the
 // spring steps by the time between frames.
 type Widget struct {
-	bitmap  *ui.Bitmap
-	metrics Metrics
-	state   *State
+	bitmap   *ui.Bitmap
+	metrics  Metrics
+	state    *State
+	counters counters
 
 	last time.Time
 	// dragging is whether the pointer is pulling the character, and dragX
@@ -75,7 +76,16 @@ func (w *Widget) Drag(dx, dy float64) {
 // link's tick: a press and drag set the spring's swing, and between drags
 // time advances it, until it comes to rest and no frames are asked for.
 func (w *Widget) View(c *ui.Context) {
+	start := time.Now()
 	now := c.Now()
+	// Mygo may run the view more than once for one frame, when a pass
+	// consumes input; the frame is the first pass, whose time differs from
+	// the previous frame's.
+	if w.last.IsZero() || now.After(w.last) {
+		w.counters.frame(start)
+	}
+	defer func() { w.counters.built(time.Since(start)) }()
+
 	var dt time.Duration
 	if !w.last.IsZero() {
 		dt = now.Sub(w.last)
@@ -101,9 +111,14 @@ func (w *Widget) View(c *ui.Context) {
 		w.dragY += float64(dy)
 		w.state.Drag(w.dragX, w.dragY)
 	} else {
-		// Released: the spring takes over from where the drag left it.
+		// Released: the spring takes over from where the drag left it. A
+		// spring already at rest stays where it is: a frame that only
+		// redraws the pet, as changing the image or a setting does, would
+		// otherwise step its last, imperceptible motion back into a sway.
 		w.dragging = false
-		w.state.Step(dt)
+		if !w.state.Resting() {
+			w.state.Step(dt)
+		}
 	}
 
 	m := w.metrics
@@ -151,6 +166,9 @@ func (w *Widget) View(c *ui.Context) {
 
 	// Frames only while something moves: Mygo idles at 0 fps at rest.
 	if w.dragging || !w.state.Resting() {
+		w.counters.active()
 		c.AnimationFrame()
+	} else {
+		w.counters.idle(start)
 	}
 }

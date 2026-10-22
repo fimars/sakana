@@ -2,12 +2,14 @@ package main
 
 import (
 	"bytes"
+	"errors"
 	"image"
 	"image/color"
 	"image/png"
 	"log"
 	"math"
 	"os"
+	"time"
 
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
@@ -29,6 +31,18 @@ type app struct {
 	// quitting is set before the windows close, so the settings window lets
 	// itself close instead of hiding, and the app can quit.
 	quitting bool
+	// startedAt is when main ran, and phases when setup finished each step;
+	// the benchmark harness reads them through Stats.
+	startedAt time.Time
+	phases    map[string]time.Time
+}
+
+// mark records that setup finished the named step at now.
+func (a *app) mark(step string) {
+	if a.phases == nil {
+		a.phases = make(map[string]time.Time, 8)
+	}
+	a.phases[step] = time.Now()
 }
 
 func main() {
@@ -37,7 +51,7 @@ func main() {
 	// Swift widget shipped with LSUIElement.
 	mygo.App.SetActivationPolicy(mygo.ActivationPolicyAccessory)
 
-	a := &app{}
+	a := &app{startedAt: time.Now()}
 	mygo.App.WhenReady(a.setup)
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
@@ -45,12 +59,14 @@ func main() {
 }
 
 func (a *app) setup() {
+	a.mark("ready")
 	// The E2E harness keeps the user's real settings out of the way; a
 	// packaged app never sets this.
 	if dir := os.Getenv("SAKANA_E2E_USERDATA"); dir != "" {
 		mygo.App.SetPath(mygo.PathUserData, dir)
 	}
 	a.store = settings.Load()
+	a.mark("store")
 	bitmap, err := pet.LoadBitmap(a.store.ImagePath)
 	if err != nil {
 		log.Printf("sakana: cannot load the character image %q: %v; showing the bundled one", a.store.ImagePath, err)
@@ -59,6 +75,7 @@ func (a *app) setup() {
 			log.Fatalf("sakana: cannot decode the bundled character: %v", err)
 		}
 	}
+	a.mark("image")
 	a.widget = pet.NewWidget(bitmap)
 
 	w, h := a.petSize()
@@ -82,6 +99,14 @@ func (a *app) setup() {
 	// A panel floats above every app; the setting may lower it to the
 	// normal level, as the Swift widget's "Always on Top" did.
 	a.petWin.SetAlwaysOnTop(a.store.AlwaysOnTop)
+	// The menu bar icon and the settings window are not on the way to the
+	// first frame: setup after this point is what the user waits for to see
+	// the pet, so the icon waits for the frame to reach the window.
+	a.petWin.OnReadyToShow(func() {
+		a.mark("firstPaint")
+		a.createTray()
+	})
+	a.mark("petWindow")
 
 	a.ui = &settings.UI{
 		Store:            a.store,
@@ -94,9 +119,38 @@ func (a *app) setup() {
 		ApplyAlwaysOnTop: a.applyAlwaysOnTop,
 		Redraw:           a.redraw,
 	}
+
+	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { a.quitting = true })
+	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { a.persistPosition() })
+
+	if sock := os.Getenv("SAKANA_E2E_SOCK"); sock != "" {
+		if err := e2e.Start(sock, a); err != nil {
+			log.Printf("sakana: e2e control server: %v", err)
+		}
+	}
+	a.mark("control")
+}
+
+// showSettings opens the settings window, which is also how the app takes
+// the keyboard: a window of an accessory app becomes key when it shows.
+func (a *app) showSettings() {
+	win := a.settingsWindow()
+	a.ui.Reset()
+	win.Show()
+	win.Focus()
+	mygo.App.Focus()
+}
+
+// settingsWindow returns the settings window, creating it the first time it
+// is needed: most launches never open it, and making it draws a frame of
+// its view, which would otherwise cost startup time and memory.
+func (a *app) settingsWindow() *mygo.Window {
+	if a.settingsWin != nil {
+		return a.settingsWin
+	}
 	// UseContentSize: the Swift window had a 460×600 content rect, and the
 	// ported view needs that much room for the coordinate pad and Apply.
-	a.settingsWin = mygo.NewWindow(mygo.WindowOptions{
+	win := mygo.NewWindow(mygo.WindowOptions{
 		Title:          "Sakana Settings",
 		Width:          460,
 		Height:         600,
@@ -108,14 +162,24 @@ func (a *app) setup() {
 	})
 	// Closing the settings window hides it, unless the app is quitting:
 	// preventing the close then would cancel the quit.
-	a.settingsWin.OnClose(func(e *mygo.CloseEvent) {
+	win.OnClose(func(e *mygo.CloseEvent) {
 		if a.quitting {
 			return
 		}
 		e.PreventDefault()
-		a.settingsWin.Hide()
+		win.Hide()
 	})
+	a.settingsWin = win
+	a.mark("settingsWindow")
+	return win
+}
 
+// createTray creates the menu bar icon once the first frame is drawn, so
+// building it is not part of the way to a visible pet.
+func (a *app) createTray() {
+	if a.tray != nil {
+		return
+	}
 	tray, err := mygo.NewTray(mygo.TrayOptions{
 		ID:             "sakana",
 		Icon:           trayIconPNG(),
@@ -130,27 +194,10 @@ func (a *app) setup() {
 	})
 	if err != nil {
 		log.Printf("sakana: cannot create the menu bar icon: %v", err)
-	} else {
-		a.tray = tray
+		return
 	}
-
-	mygo.App.OnBeforeQuit(func(*mygo.QuitEvent) { a.quitting = true })
-	mygo.App.OnWillQuit(func(*mygo.QuitEvent) { a.persistPosition() })
-
-	if sock := os.Getenv("SAKANA_E2E_SOCK"); sock != "" {
-		if err := e2e.Start(sock, a); err != nil {
-			log.Printf("sakana: e2e control server: %v", err)
-		}
-	}
-}
-
-// showSettings opens the settings window, which is also how the app takes
-// the keyboard: a window of an accessory app becomes key when it shows.
-func (a *app) showSettings() {
-	a.ui.Reset()
-	a.settingsWin.Show()
-	a.settingsWin.Focus()
-	mygo.App.Focus()
+	a.tray = tray
+	a.mark("tray")
 }
 
 func (a *app) showAbout() {
@@ -376,6 +423,40 @@ func (a *app) stateLocked() map[string]any {
 	}
 }
 
+// Stats reports the startup phases and the pet's frame telemetry, for the
+// benchmark harness. It reads the phases on the main thread, as setup
+// writes them there, and the frame counters from any goroutine.
+func (a *app) Stats() map[string]any {
+	var phases map[string]any
+	mygo.RunOnMain(func() {
+		phases = make(map[string]any, len(a.phases)+1)
+		phases["main"] = a.startedAt.UnixNano()
+		for step, at := range a.phases {
+			phases[step] = at.UnixNano()
+		}
+	})
+	frames := a.widget.Stats()
+	return map[string]any{
+		"phases": phases,
+		"frames": map[string]any{
+			"total":      frames.Frames,
+			"firstAt":    timeNanos(frames.FirstFrame),
+			"lastAt":     timeNanos(frames.LastFrame),
+			"idleAt":     timeNanos(frames.IdleAt),
+			"buildTotal": frames.BuildTotal.Nanoseconds(),
+			"buildMax":   frames.BuildMax.Nanoseconds(),
+		},
+	}
+}
+
+// timeNanos is t as unix nanoseconds, or 0 for the zero time.
+func timeNanos(t time.Time) int64 {
+	if t.IsZero() {
+		return 0
+	}
+	return t.UnixNano()
+}
+
 func (a *app) NativeWindow() uintptr { return a.petWin.NativeHandle() }
 
 func (a *app) SetAlwaysOnTop(on bool) error {
@@ -425,7 +506,16 @@ func (a *app) ShowSettings() error {
 }
 
 func (a *app) CaptureSettings() ([]byte, error) {
-	return a.settingsWin.CapturePage()
+	var data []byte
+	var err error
+	mygo.RunOnMain(func() {
+		if a.settingsWin == nil {
+			err = errors.New("sakana: the settings window is not open")
+			return
+		}
+		data, err = a.settingsWin.CapturePage()
+	})
+	return data, err
 }
 
 func (a *app) Quit() { mygo.App.Quit() }
