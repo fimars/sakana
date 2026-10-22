@@ -31,9 +31,11 @@ const (
 )
 
 var (
-	toastBackground = ui.RGBA(30, 34, 42, 0.94)
-	toastForeground = ui.RGB(255, 255, 255)
-	toastCloseMark  = ui.RGBA(255, 255, 255, 0.55)
+	toastBackground      = ui.RGBA(30, 34, 42, 0.94)
+	toastBackgroundHover = ui.RGBA(44, 49, 58, 0.96)
+	toastForeground      = ui.RGB(255, 255, 255)
+	toastCloseMark       = ui.RGBA(255, 255, 255, 0.55)
+	toastCloseHover      = ui.RGBA(255, 255, 255, 0.14)
 )
 
 // app wires the pet, its settings and the menu bar together. Everything
@@ -438,9 +440,9 @@ func (a *app) ensureToastWindow() {
 	a.toastWin = win
 }
 
-// toastView draws the reminder: the text and a close mark on a dark rounded
-// bubble, centered in the transparent window. A click anywhere on the toast
-// dismisses it, which the X makes plain to see.
+// toastView draws the reminder: the text and a close button on a dark
+// rounded bubble, centered in the transparent window. A click anywhere on
+// the toast dismisses it, which the X makes plain to see.
 func (a *app) toastView(c *ui.Context) {
 	c.Root().Background(ui.Transparent)
 	surface := ui.Box(c).Fill().Center()
@@ -451,14 +453,18 @@ func (a *app) toastView(c *ui.Context) {
 			Background(toastBackground).
 			AlignItems(ui.Center).
 			Gap(10).
+			Cursor(ui.CursorPointer).
 			Label("Dismiss reminder")
+		if bubble.Hovered() {
+			bubble.Background(toastBackgroundHover)
+		}
 		bubble.Children(func() {
 			ui.Text(c, a.toastText).
 				FontSize(14).
 				TextColor(toastForeground).
 				MaxLines(2).
 				MaxWidth(toastWidth - 120)
-			closeMark(c)
+			closeButton(c, a)
 		})
 		if bubble.Clicked() {
 			a.clearToast()
@@ -471,11 +477,20 @@ func (a *app) toastView(c *ui.Context) {
 	}
 }
 
-// closeMark draws the X at the right of the toast bubble. Painter.Line only
-// paints axis-aligned segments, so the diagonals are a stroked path.
-func closeMark(c *ui.Context) {
-	mark := ui.Box(c).Size(18, 18).Shrink(0)
-	mark.Draw(func(p *ui.Painter, r ui.Rect) {
+// closeButton draws the X at the right of the toast bubble. The pointer over
+// it shows a faint circle and the pointing hand; a click dismisses the
+// toast. Painter.Line only paints axis-aligned segments, so the diagonals
+// are a stroked path.
+func closeButton(c *ui.Context, a *app) {
+	button := ui.ButtonBase(c).
+		Size(22, 22).
+		Radius(11).
+		Cursor(ui.CursorPointer).
+		Label("Close")
+	if button.Hovered() {
+		button.Background(toastCloseHover)
+	}
+	button.Draw(func(p *ui.Painter, r ui.Rect) {
 		cx, cy := r.X+r.W/2, r.Y+r.H/2
 		var x ui.Path
 		x.MoveTo(cx-3.5, cy-3.5)
@@ -484,6 +499,9 @@ func closeMark(c *ui.Context) {
 		x.LineTo(cx-3.5, cy+3.5)
 		p.StrokePath(&x, 1.5, toastCloseMark)
 	})
+	if button.Clicked() {
+		a.clearToast()
+	}
 }
 
 // clampInt brings v into lo..hi.
