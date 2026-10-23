@@ -12,6 +12,10 @@
 # The human-readable result is artifacts/e2e/report.md.
 set -euo pipefail
 
+# The launch sway is a Core Animation overlay built with cgo. Mygo's builder
+# disables cgo by default, so keep it on for every build in this harness.
+export CGO_ENABLED=1
+
 # The pet animates and the harness captures its window: a sleeping display
 # occludes the window, Mygo holds its frames, and the checks see a frozen
 # app. Keep the display awake for the run.
@@ -707,6 +711,28 @@ print("bounds (%d,%d) == work area bottom-right %dx%d minus offsets %g,%g" % (
     b["x"], b["y"], wa["width"], wa["height"], ox, oy))
 PY
 
+step "the native sway is drawing"
+http_json GET /state "$ART/sway-1.json"
+sleep 0.35
+http_json GET /state "$ART/sway-2.json"
+check_py "sway.presentation" "$ART/sway-1.json" "$ART/sway-2.json" <<'PY'
+import json, sys
+a = json.load(open(sys.argv[1])).get("nativeSway") or {}
+b = json.load(open(sys.argv[2])).get("nativeSway") or {}
+assert a.get("active") and b.get("active"), \
+    "native sway is not active: %r -> %r" % (a, b)
+assert "presentationR" in a and "presentationR" in b, \
+    "the CA presentation pose is missing: %r -> %r" % (a, b)
+moved = abs(b["presentationR"] - a["presentationR"]) > 0.05 or \
+    abs(b["presentationY"] - a["presentationY"]) > 0.05
+assert moved, "the presentation layer did not move: %r -> %r" % (a, b)
+assert abs(a["presentationR"] - a["r"]) < 3.0, \
+    "the presentation pose is %.2f degrees from the keyframe pose" % (
+        a["presentationR"] - a["r"],)
+print("CA presentation moved from %.2f to %.2f degrees at (%.1f,%.1f); keyframe %.2f" % (
+    a["presentationR"], b["presentationR"], a["presentationX"], a["presentationY"], a["r"]))
+PY
+
 step "native window"
 request_ok "native" GET /native "$ART/native.json" || true
 
@@ -1127,8 +1153,8 @@ PREV_FRAMES=""
 while ((SECONDS - SETTLE_START < 20)); do
   http_json GET /stats "$ART/reminder-settle-stats.json"
   if [[ "$HTTP_STATUS" == "200" ]]; then
-    CUR_FRAMES=$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["frames"]["total"])' "$ART/reminder-settle-stats.json")
-    if [[ -n "$PREV_FRAMES" && "$CUR_FRAMES" == "$PREV_FRAMES" ]]; then
+    read -r CUR_FRAMES CUR_NATIVE <<<"$(python3 -c 'import json, sys; d=json.load(open(sys.argv[1])); print(d["frames"]["total"], 1 if (d.get("nativeSway") or {}).get("active") else 0)' "$ART/reminder-settle-stats.json")"
+    if [[ -n "$PREV_FRAMES" && "$CUR_FRAMES" == "$PREV_FRAMES" && "$CUR_NATIVE" == "0" ]]; then
       PET_RESTING=1
       break
     fi
@@ -1138,9 +1164,9 @@ while ((SECONDS - SETTLE_START < 20)); do
 done
 fact reminder_settle_seconds "$((SECONDS - SETTLE_START))"
 if ((PET_RESTING == 1)); then
-  pass "reminder.pet.resting" "no frames drawn over 0.3s before the toast captures ($((SECONDS - SETTLE_START))s)"
+  pass "reminder.pet.resting" "no frames and no native sway over 0.3s before the toast captures ($((SECONDS - SETTLE_START))s)"
 else
-  fail "reminder.pet.resting" "the app kept drawing frames 20s before the toast captures"
+  fail "reminder.pet.resting" "the app kept drawing frames or swaying 20s before the toast captures"
 fi
 
 # A launch starts a 40 minute work phase; run the cycle fast enough to see

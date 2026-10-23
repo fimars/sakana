@@ -291,26 +291,32 @@ def cold_start(exe):
 
 
 def wait_for_rest(app, timeout=40.0):
-    """Waits until the spring stopped asking for frames and returns its stats.
+    """Waits until the sway and the frames that follow it are done.
 
-    A window that nothing shows, as when the display sleeps or another app
-    covers it, has its frames held, so the spring freezes mid-swing with no
+    The launch sway runs on Core Animation, so the app draws no Mygo frames
+    while it moves. The native flag says whether that is expected. A window
+    that nothing shows has its frames held, and the app never reaches its
     idle mark: the frame counter says whether the app stopped on purpose."""
     deadline = time.time() + timeout
     last_frames = None
     last_change = time.time()
     while time.time() < deadline:
         stats = app.stats()
-        if stats["frames"].get("idleAt"):
+        native = stats.get("nativeSway") or {}
+        if native.get("active"):
+            last_frames = None
+            last_change = time.time()
+        elif stats["frames"].get("idleAt"):
             return stats
-        frames = stats["frames"]["total"]
-        if frames != last_frames:
-            last_frames, last_change = frames, time.time()
-        elif time.time() - last_change > 3.0:
-            raise RuntimeError(
-                "the pet's frames stopped without the spring resting (%d frames): "
-                "the display is asleep or the window is occluded; keep the "
-                "display awake while the benchmark runs" % frames)
+        else:
+            frames = stats["frames"]["total"]
+            if frames != last_frames:
+                last_frames, last_change = frames, time.time()
+            elif time.time() - last_change > 3.0:
+                raise RuntimeError(
+                    "the pet's frames stopped without the sway resting (%d frames): "
+                    "the display is asleep or the window is occluded; keep the "
+                    "display awake while the benchmark runs" % frames)
         time.sleep(0.1)
     raise RuntimeError("the pet never came to rest within %.0fs" % timeout)
 
@@ -335,25 +341,52 @@ def sway_memory(exe):
         app.close()
 
 
+def wait_for_native(app, timeout=5.0):
+    """Waits until the Core Animation sway is reported, or the app is idle.
+
+    Polling /stats while the sway runs charges the harness's own CPU to the
+    app. Read the native duration once and sleep through the animation."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        stats = app.stats()
+        native = stats.get("nativeSway") or {}
+        if native.get("active"):
+            return stats, native
+        if stats["frames"].get("idleAt"):
+            return stats, {}
+        time.sleep(0.02)
+    raise RuntimeError("the native sway did not start")
+
+
 def animation(app):
-    """The greeting sway: what it costs and how long it lasts."""
+    """The greeting sway: what it costs and how long it lasts.
+
+    The sway is a Core Animation overlay: the app draws one frame before it
+    starts and one after it stops, so the Mygo frame counters stay still."""
     before = app.wait_phase("firstPaint")
     first_at = before["frames"]["firstAt"]
     cpu_before = before["cpu"]["total"]
-    rest = wait_for_rest(app)
+    _, native = wait_for_native(app)
+    if native:
+        duration_ms = float(native.get("durationMs") or 0)
+        time.sleep(max(0.2, duration_ms / 1000.0 + 0.4))
+        rest = wait_for_rest(app, timeout=5.0)
+    else:
+        rest = wait_for_rest(app)
     idle_at = rest["frames"]["idleAt"]
-    frames = rest["frames"]["total"]
-    seconds = (idle_at - first_at) / 1e9
+    frames = max(0, rest["frames"]["total"] - before["frames"]["total"])
+    seconds = duration_ms / 1000.0 if native else (idle_at - first_at) / 1e9
     cpu_ms = (rest["cpu"]["total"] - cpu_before) / 1e6
     return {
-        "sway_ms": (idle_at - first_at) / 1e6,
+        "sway_ms": duration_ms if native else (idle_at - first_at) / 1e6,
         "sway_frames": frames,
-        "sway_fps": frames / seconds if seconds > 0 else 0,
+        "sway_fps": 0.0,
         "sway_cpu_ms": cpu_ms,
         "cpu_per_second_ms": cpu_ms / seconds if seconds > 0 else 0,
-        "frame_cpu_ms": cpu_ms / frames if frames > 0 else 0,
-        "frame_build_us": rest["frames"]["buildTotal"] / frames / 1e3 if frames > 0 else 0,
-        "refreshes_per_100_cpu_ms": cpu_ms / frames * 100 if frames > 0 else 0,
+        "frame_cpu_ms": 0.0,
+        "frame_build_us": 0.0,
+        "refreshes_per_100_cpu_ms": 0.0,
+        "native": bool(native) and frames < 10 and seconds > 1.0,
     }
 
 
@@ -464,17 +497,24 @@ def timed_post(app, path):
 
 
 def image_refresh(app, png):
-    """Choosing another character: decode and apply, then the frame that shows
-    it. Each swap kicks the spring, as changing the image does."""
+    """Choosing another character: decode and apply, then the native sway that
+    shows it. Each swap kicks the spring, as changing the image does."""
     wait_for_rest(app)
     apply_ms = []
     frame_ms = []
     for _ in range(4):
-        previous = frame_count(app)
         started = time.time()
         app.post("/image", body=png)
         apply_ms.append((time.time() - started) * 1000)
-        frame_ms.append(wait_for_frame(app, previous))
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            native = app.stats().get("nativeSway") or {}
+            if native.get("active"):
+                break
+            time.sleep(0.005)
+        else:
+            raise RuntimeError("a swapped character did not start its native sway")
+        frame_ms.append((time.time() - started) * 1000)
     return {
         "image_apply_ms": statistics.median(apply_ms),
         "image_frame_ms": statistics.median(frame_ms),
@@ -548,12 +588,12 @@ def write_report(out, facts, cold, session, checks):
 
     sway = session["animation"]
     refresh_rows = [
-        ["animation", "frames per second", human_ms(sway["sway_fps"])],
+        ["animation", "Core Animation sway", "yes" if sway["native"] else "no"],
         ["animation", "CPU, ms per second", human_ms(sway["cpu_per_second_ms"])],
-        ["animation", "CPU, ms per 100 frames", human_ms(sway["refreshes_per_100_cpu_ms"])],
-        ["animation", "view build per frame, ms", "%.3f" % (sway["frame_build_us"] / 1000)],
+        ["animation", "CPU, ms per 100 Mygo frames", human_ms(sway["refreshes_per_100_cpu_ms"])],
+        ["animation", "view build per Mygo frame, ms", "%.3f" % (sway["frame_build_us"] / 1000)],
         ["animation", "greeting sway, ms", human_ms(sway["sway_ms"])],
-        ["animation", "greeting sway, frames", human_ms(sway["sway_frames"])],
+        ["animation", "greeting sway, Mygo frames", human_ms(sway["sway_frames"])],
         ["animation", "greeting sway, CPU ms", human_ms(sway["sway_cpu_ms"])],
         ["forced refresh", "request to drawn frame, ms", human_ms(session["refresh"]["refresh_latency_ms"])],
         ["forced refresh", "CPU, ms per 100 refreshes", human_ms(session["refresh"]["refresh_cpu_per_100_ms"])],
@@ -582,7 +622,7 @@ def write_report(out, facts, cold, session, checks):
         ["settings file", "save and reload, ms per 100", human_ms(session["settings"]["settings_reload_per_100_ms"])],
         ["settings file", "save and reload, CPU ms per 100", human_ms(session["settings"]["settings_reload_cpu_per_100_ms"])],
         ["character image", "decode and apply, ms", human_ms(session["image"]["image_apply_ms"])],
-        ["character image", "apply to drawn frame, ms", human_ms(session["image"]["image_frame_ms"])],
+        ["character image", "apply to native sway, ms", human_ms(session["image"]["image_frame_ms"])],
         ["quit", "request to process gone, ms", human_ms(session["quit_ms"])],
     ]
 
@@ -622,8 +662,9 @@ def write_report(out, facts, cold, session, checks):
     lines.append("")
     lines.append("## Refresh")
     lines.append("")
-    lines.append("The greeting sway is the app's own animation: the pet swings once on "
-                 "launch and then stops asking for frames, and the app idles at 0 fps.")
+    lines.append("The greeting sway runs on a Core Animation overlay: the pet swings "
+                 "once on launch, Mygo draws no frames while it moves, and the app "
+                 "idles at 0 fps when it rests.")
     lines.append("")
     lines.append(table(["scenario", "measure", "ms"], refresh_rows))
     lines.append("")
@@ -656,10 +697,9 @@ def write_report(out, facts, cold, session, checks):
     lines.append("- Startup is the one-shot cost, measured to the frame that reaches the "
                  "screen: `spawn_to_first_paint_ms` is what a user waits for.")
     lines.append("- The greeting sway happens once per launch; `sway_cpu_ms` is the CPU "
-                 "the app spends on it, and `ms per 100 frames` is what a frame costs. "
-                 "That per-frame CPU follows whatever else draws on the screen, as "
-                 "CoreAnimation composes with it, so compare runs from a similarly idle "
-                 "screen.")
+                 "the app spends on it. Core Animation draws the intermediate frames, "
+                 "so the app's Mygo frame count stays near zero. `ms per 100 Mygo "
+                 "frames` applies to forced refreshes, not to the native sway.")
     lines.append("- At rest the app must draw no frames and use no CPU; that is checked, "
                  "not just reported. A refresh while the pet rests draws the one frame it "
                  "asks for: a resting spring is not stepped back into a swing.")
@@ -686,7 +726,7 @@ def main():
     session = {
         "animation": {"sway_ms": 0, "sway_frames": 0, "sway_fps": 0, "sway_cpu_ms": 0,
                       "cpu_per_second_ms": 0, "frame_cpu_ms": 0, "frame_build_us": 0,
-                      "refreshes_per_100_cpu_ms": 0},
+                      "refreshes_per_100_cpu_ms": 0, "native": False},
         "idle": {"idle_frames": 0, "idle_cpu_ms": 0, "idle_rss_mb": 0,
                  "idle_footprint_mb": None, "idle_footprint_top": [],
                  "idle_heap_mb": 0, "idle_goroutines": 0},
@@ -727,11 +767,12 @@ def main():
             app.wait_health()
             session["animation"] = animation(app)
             sway = session["animation"]
-            print("  greeting sway: %.0f ms, %d frames, %.0f ms CPU"
-                  % (sway["sway_ms"], sway["sway_frames"], sway["sway_cpu_ms"]))
-            checks.add("animation.rest", sway["sway_frames"] > 100,
-                       "%d frames until rest in %.0f ms"
-                       % (sway["sway_frames"], sway["sway_ms"]))
+            print("  greeting sway: %.0f ms, %d Mygo frames, %.0f ms CPU%s"
+                  % (sway["sway_ms"], sway["sway_frames"], sway["sway_cpu_ms"],
+                     " (Core Animation)" if sway["native"] else ""))
+            checks.add("animation.rest", sway["sway_ms"] > 1000,
+                       "the sway lasted %.0f ms with %d Mygo frames"
+                       % (sway["sway_ms"], sway["sway_frames"]))
 
             session["idle"] = idle(app)
             row = session["idle"]
@@ -761,10 +802,11 @@ def main():
 
             session["image"] = image_refresh(app, png)
             row = session["image"]
-            print("  image: decode and apply %.1f ms, drawn %.1f ms later"
+            print("  image: decode and apply %.1f ms, native sway %.1f ms later"
                   % (row["image_apply_ms"], row["image_frame_ms"]))
             checks.add("image.refresh", row["image_frame_ms"] < 1000,
-                       "a swapped character was drawn after %.1f ms" % row["image_frame_ms"])
+                       "a swapped character started its native sway after %.1f ms"
+                       % row["image_frame_ms"])
 
             session["quit_ms"] = app.quit()
             print("  quit: %.0f ms" % session["quit_ms"])
