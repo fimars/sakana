@@ -42,6 +42,7 @@ var (
 // runs after the app is ready, so it may create windows and trays.
 type app struct {
 	store       *settings.Store
+	character   *pet.Character
 	widget      *pet.Widget
 	petWin      *mygo.Window
 	settingsWin *mygo.Window
@@ -91,16 +92,17 @@ func (a *app) setup() {
 	}
 	a.store = settings.Load()
 	a.mark("store")
-	bitmap, err := pet.LoadBitmap(a.store.ImagePath)
+	character, err := pet.LoadCharacter(a.store.ImagePath, a.store.Cutout)
 	if err != nil {
 		log.Printf("sakana: cannot load the character image %q: %v; showing the bundled one", a.store.ImagePath, err)
 		a.store.ImagePath = ""
-		if bitmap, err = pet.DefaultBitmap(); err != nil {
+		if character, err = pet.DefaultCharacter(a.store.Cutout); err != nil {
 			log.Fatalf("sakana: cannot decode the bundled character: %v", err)
 		}
 	}
+	a.character = character
 	a.mark("image")
-	a.widget = pet.NewWidget(bitmap)
+	a.widget = pet.NewWidget(a.character.Bitmap())
 
 	w, h := a.petSize()
 	x, y := a.positionFor(a.store.ScreenLabel, a.store.OffsetX, a.store.OffsetY, w, h)
@@ -145,6 +147,7 @@ func (a *app) setup() {
 		PetSize:          a.petSize,
 		Apply:            a.applyPosition,
 		ApplyAlwaysOnTop: a.applyAlwaysOnTop,
+		ApplyCutout:      a.applyCutout,
 		ApplyReminder:    a.applyReminder,
 		Redraw:           a.redraw,
 	}
@@ -317,6 +320,16 @@ func (a *app) applyAlwaysOnTop(on bool) {
 		a.toastWin.SetAlwaysOnTop(on)
 	}
 	a.saveStore()
+}
+
+// applyCutout stores the cutout toggle and shows the matching bitmap, as
+// the always-on-top toggle applies as it changes.
+func (a *app) applyCutout(on bool) {
+	a.store.Cutout = on
+	if err := a.character.SetCutout(on); err != nil {
+		log.Printf("sakana: cannot cut out the character image: %v", err)
+	}
+	a.applyBitmap(a.character.Bitmap(), a.store.ImagePath)
 }
 
 // minutesToDuration turns the settings' minutes into a duration.
@@ -540,20 +553,22 @@ func (a *app) pickImage() {
 }
 
 func (a *app) removeImage() {
-	bitmap, err := pet.DefaultBitmap()
+	character, err := pet.DefaultCharacter(a.store.Cutout)
 	if err != nil {
 		log.Printf("sakana: cannot decode the bundled character: %v", err)
 		return
 	}
-	a.applyBitmap(bitmap, "")
+	a.character = character
+	a.applyBitmap(character.Bitmap(), "")
 }
 
 func (a *app) setImageBytes(data []byte, path string) error {
-	bitmap, err := pet.LoadBitmapBytes(data)
+	character, err := pet.NewCharacterBytes(data, a.store.Cutout)
 	if err != nil {
 		return err
 	}
-	a.applyBitmap(bitmap, path)
+	a.character = character
+	a.applyBitmap(character.Bitmap(), path)
 	return nil
 }
 
@@ -650,6 +665,24 @@ func (a *app) stateLocked() map[string]any {
 		})
 	}
 	snap := a.reminder.Snapshot()
+	cutout := map[string]any{"enabled": a.store.Cutout}
+	if a.store.Cutout {
+		r := a.character.Report()
+		cutout["keyed"] = r.Keyed
+		cutout["transparent"] = r.Transparent
+		cutout["background"] = map[string]any{
+			"r": r.Background.R, "g": r.Background.G, "b": r.Background.B, "a": r.Background.A,
+		}
+		cutout["removedFraction"] = r.RemovedFraction
+		cutout["rim"] = r.Rim
+		cutout["sourceWidth"] = r.SourceWidth
+		cutout["sourceHeight"] = r.SourceHeight
+		cutout["workWidth"] = r.WorkWidth
+		cutout["workHeight"] = r.WorkHeight
+		cutout["width"] = r.Width
+		cutout["height"] = r.Height
+		cutout["durationMs"] = float64(r.Duration) / float64(time.Millisecond)
+	}
 	toast := map[string]any{"visible": false, "text": a.toastText}
 	if a.toastWin != nil {
 		tb := a.toastWin.Bounds()
@@ -665,6 +698,7 @@ func (a *app) stateLocked() map[string]any {
 		"panel":       a.petWin.IsPanel(),
 		"alwaysOnTop": a.petWin.IsAlwaysOnTop(),
 		"settings":    a.store.Map(),
+		"cutout":      cutout,
 		"reminder": map[string]any{
 			"enabled":     snap.Enabled,
 			"text":        snap.Text,
@@ -744,6 +778,20 @@ func (a *app) SetImageBytes(data []byte) error {
 	var err error
 	mygo.RunOnMain(func() { err = a.setImageBytes(data, "") })
 	return err
+}
+
+// SetCutout applies the cutout toggle, as the settings checkbox does.
+func (a *app) SetCutout(on bool) error {
+	mygo.RunOnMain(func() { a.applyCutout(on) })
+	return nil
+}
+
+// CaptureCharacter returns a PNG of the character image's active pixels.
+func (a *app) CaptureCharacter() ([]byte, error) {
+	var data []byte
+	var err error
+	mygo.RunOnMain(func() { data, err = a.character.Capture() })
+	return data, err
 }
 
 func (a *app) RequestFrame() { a.petWin.Update(func() {}) }

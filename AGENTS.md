@@ -39,7 +39,9 @@ the way to the first frame: the pet window is created first, the settings
 window is created on its first open (`app.settingsWindow`), and the menu bar
 icon is created from `Window.OnReadyToShow`, which runs after the first frame
 reaches the window (`app.createTray`). Anything done in `setup` before that
-delays the pet's appearance one-for-one.
+delays the pet's appearance one-for-one. The cutout setting processes the
+character image during setup at up to 512 px a side; with the setting off, the
+default, setup is unchanged.
 
 ## Mygo notes for this app
 
@@ -102,7 +104,8 @@ delays the pet's appearance one-for-one.
 
 - `main.go` — lifecycle, pet window, menu bar item, settings wiring, E2E hook
 - `internal/pet` — spring (`state.go`), viewport (`layout.go`), widget (`widget.go`),
-  image (`image.go`), frame telemetry (`stats.go`)
+  character (`character.go`), cutout (`cutout.go`), image (`image.go`), frame
+  telemetry (`stats.go`)
 - `internal/reminder` — the work/rest reminder cycle (`scheduler.go`)
 - `internal/settings` — store (`store.go`) and settings window (`view.go`)
 - `internal/e2e` — control server for the harnesses (`/stats` and the process's CPU time in `stats.go`)

@@ -18,6 +18,9 @@ type Store struct {
 	OffsetX     float64 `json:"offsetX"`     // DIPs from the right edge of the screen's work area
 	OffsetY     float64 `json:"offsetY"`     // DIPs from the bottom edge
 	ImagePath   string  `json:"imagePath"`   // empty: the bundled character
+	// Cutout keys the image's background away and shows a white outline
+	// around it.
+	Cutout bool `json:"cutout"`
 
 	// The rest reminder: a toast shows above the pet when a work phase
 	// ends, and the next one starts when the rest phase ends.
@@ -104,6 +107,7 @@ func (s *Store) Map() map[string]any {
 		"offsetX":     s.OffsetX,
 		"offsetY":     s.OffsetY,
 		"imagePath":   s.ImagePath,
+		"cutout":      s.Cutout,
 
 		"reminderEnabled":     s.ReminderEnabled,
 		"reminderText":        s.ReminderText,

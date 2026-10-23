@@ -41,6 +41,8 @@ type UI struct {
 	Apply func(screenLabel string, offsetX, offsetY float64)
 	// ApplyAlwaysOnTop applies the floating toggle.
 	ApplyAlwaysOnTop func(on bool)
+	// ApplyCutout applies the background-removal toggle.
+	ApplyCutout func(on bool)
 	// ApplyReminder applies the rest reminder fields as they change.
 	ApplyReminder func(enabled bool, text string, workMinutes, restMinutes float64)
 	// Redraw requests a frame of the settings and pet windows.
@@ -61,6 +63,7 @@ type UI struct {
 	padPressed bool
 
 	lastAlwaysOnTop bool
+	lastCutout      bool
 }
 
 // primaryOption is the picker's item for the primary display.
@@ -99,6 +102,7 @@ func (u *UI) Reset() {
 			}
 		}
 		u.lastAlwaysOnTop = u.Store.AlwaysOnTop
+		u.lastCutout = u.Store.Cutout
 	}
 	u.padPressed = false
 	u.updateBounds()
@@ -220,6 +224,15 @@ func (u *UI) imageSection(c *ui.Context, t *ui.Theme) {
 				u.RemoveImage()
 			}
 		})
+		if u.Store != nil {
+			ui.Checkbox(c, &u.Store.Cutout, "Remove background, add white outline")
+			if u.Store.Cutout != u.lastCutout {
+				u.lastCutout = u.Store.Cutout
+				if u.ApplyCutout != nil {
+					u.ApplyCutout(u.Store.Cutout)
+				}
+			}
+		}
 	})
 }
 
