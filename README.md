@@ -5,8 +5,7 @@ A desktop pet for macOS — a little fish (or your own character) that sways and
 ![Sakana widget](assets/widget-screenshot.png)
 
 Written in Go with [Mygo](https://mygo.egoist.dev): one small binary, a native
-UI drawn on the GPU, no webview and no Xcode project. The launch sway runs on
-Core Animation through a small cgo/Objective-C overlay. The pet floats in a transparent,
+UI drawn on the GPU, no webview and no Xcode. The pet floats in a transparent,
 non-activating panel — it shows on every Space and over full-screen apps, and
 clicking it does not take the frontmost app's place.
 
@@ -26,19 +25,14 @@ clicking it does not take the frontmost app's place.
 
 - macOS 12+
 - Go 1.27+
-- Xcode Command Line Tools, for clang and the macOS SDK used by the Core
-  Animation overlay
 
 ## Build & Run
 
 ```sh
-CGO_ENABLED=1 go run .                # run from source
-CGO_ENABLED=1 go tool mygo build      # package build/darwin-arm64/Sakana.app (+ .dmg)
-CGO_ENABLED=1 go build ./...          # compile only
+go run .                # run from source
+go tool mygo build      # package build/darwin-arm64/Sakana.app (+ .dmg)
+go build ./...          # compile only
 ```
-
-Mygo's builder disables cgo by default; the app's Core Animation overlay needs
-it, so set `CGO_ENABLED=1` for every build. Both harnesses do this for you.
 
 `tools/e2e.sh` is the test: it launches the app with a control socket, checks
 the window, viewport, spring and settings behavior, captures PNGs, packages the
@@ -57,10 +51,10 @@ number, and the report is in integer milliseconds:
 tools/bench.sh
 ```
 
-On an M-series Mac a warm launch shows the pet in about 140 ms, the one-time
-greeting sway runs on Core Animation and costs a few tens of milliseconds of
-app CPU over ten seconds, and at rest the app draws no frame and uses no CPU.
-Numbers follow the machine and the display, so compare medians.
+On an M-series Mac a warm launch shows the pet in about 170 ms, the one-time
+greeting sway costs about a second of CPU over ten seconds, and at rest the app
+draws no frame and uses no CPU. Numbers follow the machine and the display, so
+compare medians.
 Artifact: `artifacts/bench/report.md`.
 
 ## Settings
@@ -82,7 +76,6 @@ Settings live in `~/Library/Application Support/Sakana/settings.json`.
 
 - `main.go` — app lifecycle, the pet window, the menu bar item, wiring
 - `internal/pet` — spring physics, viewport metrics, the native-UI widget, image loading
-- `internal/ca` — the Core Animation launch-sway overlay and its cgo/Objective-C boundary
 - `internal/reminder` — the work/rest reminder cycle and its timer
 - `internal/settings` — the settings store and the settings window
 - `internal/e2e`, `tools/e2e.sh` — the end-to-end harness

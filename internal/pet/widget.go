@@ -42,13 +42,6 @@ type Widget struct {
 	state    *State
 	counters counters
 
-	// nativeSway is set while Core Animation owns the launch sway: View
-	// draws no frames of its own until it is cleared.
-	nativeSway bool
-	// NativeInterrupt cancels the native sway when the pointer grabs the
-	// character. It runs on the main thread.
-	NativeInterrupt func()
-
 	last time.Time
 	// accum is unstepped time, drained in physicsStep slices by step.
 	accum time.Duration
@@ -71,9 +64,6 @@ func (w *Widget) Bitmap() *ui.Bitmap { return w.bitmap }
 
 // State returns the spring, for the app and for tests.
 func (w *Widget) State() *State { return w.state }
-
-// SetNativeSway tells View that Core Animation is drawing the sway.
-func (w *Widget) SetNativeSway(on bool) { w.nativeSway = on }
 
 // Metrics returns the viewport the current character needs.
 func (w *Widget) Metrics() Metrics { return w.metrics }
@@ -130,12 +120,6 @@ func (w *Widget) View(c *ui.Context) {
 	surface := ui.Box(c).Fill()
 	dx, dy, pressed := surface.Dragged()
 	if pressed {
-		if w.nativeSway {
-			w.nativeSway = false
-			if w.NativeInterrupt != nil {
-				w.NativeInterrupt()
-			}
-		}
 		if !w.dragging {
 			// The first frame of a press starts the drag where it began,
 			// as SwiftUI's DragGesture translation did.
@@ -152,7 +136,7 @@ func (w *Widget) View(c *ui.Context) {
 		// redraws the pet, as changing the image or a setting does, would
 		// otherwise step its last, imperceptible motion back into a sway.
 		w.dragging = false
-		if !w.state.Resting() && !w.nativeSway {
+		if !w.state.Resting() {
 			w.step(dt)
 		}
 	}
@@ -203,8 +187,6 @@ func (w *Widget) View(c *ui.Context) {
 	// Frames only while something moves: Mygo idles at 0 fps at rest. A
 	// drag keeps the display rate for a responsive pull.
 	switch {
-	case w.nativeSway:
-		w.counters.active()
 	case w.dragging:
 		w.counters.active()
 		c.AnimationFrame()

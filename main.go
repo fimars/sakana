@@ -15,7 +15,6 @@ import (
 	"github.com/egoist/mygo"
 	"github.com/egoist/mygo/ui"
 
-	"github.com/fimars/sakana/internal/ca"
 	"github.com/fimars/sakana/internal/e2e"
 	"github.com/fimars/sakana/internal/pet"
 	"github.com/fimars/sakana/internal/reminder"
@@ -60,14 +59,6 @@ type app struct {
 	// the benchmark harness reads them through Stats.
 	startedAt time.Time
 	phases    map[string]time.Time
-
-	// The launch sway handed to Core Animation: the image the overlay
-	// decodes, the simulated keyframes, and when the overlay started. All
-	// main thread only, as the overlay is.
-	imageBytes  []byte
-	sway        *ca.Sway
-	swayStates  []pet.State
-	swayStarted time.Time
 }
 
 // mark records that setup finished the named step at now.
@@ -110,17 +101,6 @@ func (a *app) setup() {
 	}
 	a.mark("image")
 	a.widget = pet.NewWidget(bitmap)
-	// The native sway decodes the image itself, so it keeps the bytes the
-	// bitmap came from.
-	if a.store.ImagePath != "" {
-		if data, err := os.ReadFile(a.store.ImagePath); err == nil {
-			a.imageBytes = data
-		}
-	}
-	if len(a.imageBytes) == 0 {
-		a.imageBytes = pet.DefaultBitmapBytes()
-	}
-	a.widget.NativeInterrupt = a.cancelNativeSway
 
 	w, h := a.petSize()
 	x, y := a.positionFor(a.store.ScreenLabel, a.store.OffsetX, a.store.OffsetY, w, h)
@@ -153,7 +133,6 @@ func (a *app) setup() {
 	a.petWin.OnReadyToShow(func() {
 		a.mark("firstPaint")
 		a.createTray()
-		a.startNativeSway()
 	})
 	a.mark("petWindow")
 
@@ -177,7 +156,6 @@ func (a *app) setup() {
 		a.persistPosition()
 		a.reminder.Stop()
 		a.clearToast()
-		a.cancelNativeSway()
 	})
 
 	if sock := os.Getenv("SAKANA_E2E_SOCK"); sock != "" {
@@ -186,133 +164,6 @@ func (a *app) setup() {
 		}
 	}
 	a.mark("control")
-}
-
-// swayInterval is the pet's 100 Hz physics step. The overlay samples that
-// trajectory every overlayStride steps: Core Animation interpolates between
-// keyframes, so 33 Hz keyframes are smooth and cost a third of the numbers
-// at 100 Hz.
-const (
-	swayInterval  = 10 * time.Millisecond
-	overlayStride = 3
-)
-
-// startNativeSway simulates the launch sway and hands its keyframes to
-// Core Animation, which animates them while the app draws no frames. It
-// runs on the main thread, with the first Mygo frame already drawn.
-func (a *app) startNativeSway() {
-	if a.quitting || a.petWin == nil || len(a.imageBytes) == 0 {
-		return
-	}
-	st := *a.widget.State()
-	if st.Resting() {
-		return
-	}
-	states := []pet.State{st}
-	for !st.Resting() && len(states) < 5000 {
-		st.Step(swayInterval)
-		states = append(states, st)
-	}
-	if len(states) < 100 {
-		// What the spring has left is under a second; the widget draws it
-		// itself rather than hand an overlay over for it.
-		return
-	}
-	frames := make([]ca.Frame, 0, len(states)/overlayStride+1)
-	for i, s := range states {
-		if i%overlayStride == 0 || i == len(states)-1 {
-			frames = append(frames, ca.Frame{R: s.R, Y: s.Y})
-		}
-	}
-	m := a.widget.Metrics()
-	s, err := ca.Start(a.petWin.NativeHandle(), a.imageBytes, ca.Metrics{
-		MidX:             m.MidX(),
-		BaseTopY:         m.BaseTopY(),
-		BaseWidth:        m.BaseWidth,
-		BaseHeight:       m.BaseHeight,
-		RodLength:        m.RodLength,
-		RodVerticalScale: m.RodVerticalScale,
-		ImageSize:        m.ImageSize,
-	}, frames, swayInterval*overlayStride)
-	if err != nil {
-		log.Printf("sakana: native sway did not start: %v", err)
-		return
-	}
-	a.sway, a.swayStates, a.swayStarted = s, states, time.Now()
-	a.widget.SetNativeSway(true)
-	go func() {
-		<-s.Done()
-		mygo.RunOnMain(func() { a.finishNativeSway(s) })
-	}()
-}
-
-// finishNativeSway leaves the animation on its final frame, draws the same
-// resting pose with Mygo, and removes the overlay once that frame is up.
-func (a *app) finishNativeSway(s *ca.Sway) {
-	if a.sway != s {
-		return
-	}
-	*a.widget.State() = a.swayStates[len(a.swayStates)-1]
-	a.sway, a.swayStates = nil, nil
-	a.widget.SetNativeSway(false)
-	a.petWin.Update(func() {})
-	time.AfterFunc(120*time.Millisecond, func() { mygo.RunOnMain(s.Cancel) })
-}
-
-// cancelNativeSway hands the pose at this moment back to Mygo, for a drag,
-// an image swap, or a quit before the animation ends.
-func (a *app) cancelNativeSway() {
-	if a.sway == nil {
-		return
-	}
-	s := a.sway
-	*a.widget.State() = a.poseAt(time.Since(a.swayStarted))
-	a.sway, a.swayStates = nil, nil
-	a.widget.SetNativeSway(false)
-	s.Cancel()
-	a.petWin.Update(func() {})
-}
-
-// poseAt is the keyframe elapsed into the sway, clamped to its ends.
-func (a *app) poseAt(elapsed time.Duration) pet.State {
-	i := int(elapsed / swayInterval)
-	if i < 0 {
-		i = 0
-	}
-	if i >= len(a.swayStates) {
-		i = len(a.swayStates) - 1
-	}
-	return a.swayStates[i]
-}
-
-// nativeSwayLocked describes the overlay for the harness, and returns the
-// pose to report in physics: while the overlay runs that is the keyframe at
-// this moment, not the widget's stale state. It runs on the main thread.
-func (a *app) nativeSwayLocked(st *pet.State) (map[string]any, pet.State) {
-	pose := *st
-	out := map[string]any{
-		"active":     false,
-		"r":          pose.R,
-		"y":          pose.Y,
-		"startedAt":  int64(0),
-		"durationMs": float64(0),
-		"frames":     0,
-	}
-	if a.sway == nil {
-		return out, pose
-	}
-	pose = a.poseAt(time.Since(a.swayStarted))
-	out["active"] = true
-	out["r"] = pose.R
-	out["y"] = pose.Y
-	out["startedAt"] = a.swayStarted.UnixNano()
-	out["durationMs"] = float64(time.Duration(len(a.swayStates)-1) * swayInterval / time.Millisecond)
-	if r, x, y, ok := a.sway.Presentation(); ok {
-		out["presentationR"] = r
-		out["presentationX"] = x
-		out["presentationY"] = y
-	}
-	return out, pose
 }
 
 // showSettings opens the settings window, which is also how the app takes
@@ -694,7 +545,6 @@ func (a *app) removeImage() {
 		log.Printf("sakana: cannot decode the bundled character: %v", err)
 		return
 	}
-	a.imageBytes = pet.DefaultBitmapBytes()
 	a.applyBitmap(bitmap, "")
 }
 
@@ -703,17 +553,13 @@ func (a *app) setImageBytes(data []byte, path string) error {
 	if err != nil {
 		return err
 	}
-	a.imageBytes = data
 	a.applyBitmap(bitmap, path)
 	return nil
 }
 
 // applyBitmap shows a new character, resizing the window to its viewport
-// and keeping the base where it was, as the Swift controller did. Any
-// running sway is cancelled first, and the new character greets with a
-// native sway once the new bitmap is in and the window resized.
+// and keeping the base where it was, as the Swift controller did.
 func (a *app) applyBitmap(bitmap *ui.Bitmap, path string) {
-	a.cancelNativeSway()
 	old := a.petWin.Bounds()
 	a.widget.SetBitmap(bitmap)
 	w, h := a.petSize()
@@ -726,7 +572,6 @@ func (a *app) applyBitmap(bitmap *ui.Bitmap, path string) {
 	a.store.ImagePath = path
 	a.saveStore()
 	a.redraw()
-	a.startNativeSway()
 }
 
 func (a *app) redraw() {
@@ -813,8 +658,6 @@ func (a *app) stateLocked() map[string]any {
 			"x": tb.X, "y": tb.Y, "width": tb.Width, "height": tb.Height,
 		}
 	}
-	nativeSway, pose := a.nativeSwayLocked(st)
-	physics := map[string]float64{"r": pose.R, "y": pose.Y, "t": pose.T, "w": pose.W, "size": pose.Size}
 	return map[string]any{
 		"pid":         os.Getpid(),
 		"bounds":      map[string]any{"x": b.X, "y": b.Y, "width": b.Width, "height": b.Height},
@@ -838,9 +681,8 @@ func (a *app) stateLocked() map[string]any {
 			"basePad": m.BasePad, "rodVerticalScale": m.RodVerticalScale,
 			"maxR": m.MaxR, "maxY": m.MaxY,
 		},
-		"physics":    physics,
-		"displays":   displays,
-		"nativeSway": nativeSway,
+		"physics":  map[string]float64{"r": st.R, "y": st.Y, "t": st.T, "w": st.W, "size": st.Size},
+		"displays": displays,
 	}
 }
 
@@ -849,19 +691,16 @@ func (a *app) stateLocked() map[string]any {
 // writes them there, and the frame counters from any goroutine.
 func (a *app) Stats() map[string]any {
 	var phases map[string]any
-	var nativeSway map[string]any
 	mygo.RunOnMain(func() {
 		phases = make(map[string]any, len(a.phases)+1)
 		phases["main"] = a.startedAt.UnixNano()
 		for step, at := range a.phases {
 			phases[step] = at.UnixNano()
 		}
-		nativeSway, _ = a.nativeSwayLocked(a.widget.State())
 	})
 	frames := a.widget.Stats()
 	return map[string]any{
-		"phases":     phases,
-		"nativeSway": nativeSway,
+		"phases": phases,
 		"frames": map[string]any{
 			"total":      frames.Frames,
 			"firstAt":    timeNanos(frames.FirstFrame),
@@ -895,7 +734,6 @@ func (a *app) ApplyOffsets(x, y float64) error {
 
 func (a *app) Drag(dx, dy float64) error {
 	mygo.RunOnMain(func() {
-		a.cancelNativeSway()
 		a.widget.Drag(dx, dy)
 		a.petWin.Invalidate()
 	})

@@ -12,10 +12,6 @@
 # compare: startup is sensitive to a busy machine.
 set -euo pipefail
 
-# The launch sway is a Core Animation overlay built with cgo. Mygo's builder
-# disables cgo by default, so keep it on for every build in this harness.
-export CGO_ENABLED=1
-
 # A sleeping display occludes the pet's window, and Mygo holds its frames
 # while nothing shows it: the greeting sway would freeze mid-swing and the
 # benchmark would measure a stopped app. Re-exec once under caffeinate so the

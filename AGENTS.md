@@ -6,9 +6,9 @@
 
 ## Build, run, test
 
-- `CGO_ENABLED=1 go build ./...` — compile
-- `CGO_ENABLED=1 go run .` — run from source
-- `CGO_ENABLED=1 go tool mygo build` — package `build/darwin-arm64/Sakana.app` and a `.dmg`
+- `go build ./...` — compile
+- `go run .` — run from source
+- `go tool mygo build` — package `build/darwin-arm64/Sakana.app` and a `.dmg`
 - `tools/e2e.sh` — the test: builds, launches the app with `SAKANA_E2E_SOCK`,
   asserts the window, viewport, spring, settings, image and rest reminder
   behavior, captures PNGs, then packages the app and checks its bundle.
@@ -24,16 +24,11 @@ Mygo is pinned to v0.6.2 in `go.mod`; its API is 0.x and moves fast, so read the
 release notes before upgrading. There are no unit tests: the E2E script is the
 test, and the benchmark only measures.
 
-The launch sway is a Core Animation overlay in `internal/ca`, built with cgo
-and a small Objective-C file. Mygo's builder sets `CGO_ENABLED=0` when the
-environment does not, so the commands above and both harnesses export
-`CGO_ENABLED=1`. The package has a non-darwin stub; the rest of the app stays
-Go.
-
-Both harnesses run under `caffeinate`: the display must stay awake for the
-first frame, the forced refreshes and the window captures. `tools/bench.sh`
-also runs the scenario app with Always on Top on, so the CA overlay and the
-pet stay visible on a busy desktop.
+Both harnesses run under `caffeinate`: Mygo holds a window's frames while
+nothing shows it, so a sleeping display freezes the pet mid-sway and the
+checks see a stopped app. `tools/bench.sh` also runs the scenario app with
+Always on Top on, because at the default window level the front app covers the
+pet and the sway pauses.
 
 ## Startup
 
@@ -43,9 +38,8 @@ first pet window (~50 ms), before any of this app's code runs. Keep setup off
 the way to the first frame: the pet window is created first, the settings
 window is created on its first open (`app.settingsWindow`), and the menu bar
 icon is created from `Window.OnReadyToShow`, which runs after the first frame
-reaches the window (`app.createTray`). The native sway also starts there, after
-that frame, so its cgo/Objective-C setup never delays the pet's appearance.
-Anything done in `setup` before that delays the pet's appearance one-for-one.
+reaches the window (`app.createTray`). Anything done in `setup` before that
+delays the pet's appearance one-for-one.
 
 ## Mygo notes for this app
 
@@ -68,12 +62,11 @@ Anything done in `setup` before that delays the pet's appearance one-for-one.
   the app's startup phases, the process CPU time and its heap.
 - A window whose content nothing shows has its frames held, and the display
   link is paused at rest: an occluded pet draws nothing and an idle app uses no
-  CPU. The greeting sway runs once per launch (and per character change) on the
-  Core Animation overlay. The spring steps at 100 Hz, the overlay samples that
-  trajectory at 33 Hz, and the render server interpolates the layers, so Mygo
-  draws no frames during the ~10 s sway and the app spends tens of milliseconds
-  of CPU on it. The widget's 60 fps path handles a drag and a short fallback
-  sway. At the handoff the app draws one final resting frame with Mygo.
+  CPU. The greeting sway runs once per launch (and per character change) and
+  takes about 10 s to come to rest; the spring steps at 100 Hz while the widget
+  draws at most 60 fps, so the sway costs about a third less CPU than drawing
+  at the display's 100–120 Hz. While it runs Mygo keeps the frame it drew, so
+  the app's footprint is higher until the pet rests.
 - A spring at rest is not stepped: its residual motion is below `Resting`'s
   threshold but stepping it from a redraw's frame would turn it back into a
   short swing. `Widget.View` only steps a spring that is still moving.
@@ -103,17 +96,13 @@ Anything done in `setup` before that delays the pet's appearance one-for-one.
   on-screen window is not affected, and a capture taken right after the window
   drew (or while no other window animates) is correct. The E2E harness captures
   the settings window immediately after opening it for this reason; wait for
-  the pet to come to rest before capturing it for screenshots. `CapturePage`
-  also reads the layer's model pose, not a Core Animation presentation pose, so
-  the E2E checks the live sway through `nativeSway.presentationR` and `.presentationY`.
+  the pet to come to rest before capturing it for screenshots.
 
 ## Structure
 
 - `main.go` — lifecycle, pet window, menu bar item, settings wiring, E2E hook
 - `internal/pet` — spring (`state.go`), viewport (`layout.go`), widget (`widget.go`),
   image (`image.go`), frame telemetry (`stats.go`)
-- `internal/ca` — the Core Animation sway overlay, its cgo/Objective-C boundary
-  and its non-darwin stub
 - `internal/reminder` — the work/rest reminder cycle (`scheduler.go`)
 - `internal/settings` — store (`store.go`) and settings window (`view.go`)
 - `internal/e2e` — control server for the harnesses (`/stats` and the process's CPU time in `stats.go`)
