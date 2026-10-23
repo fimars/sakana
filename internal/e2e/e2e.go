@@ -5,6 +5,7 @@ package e2e
 
 import (
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -43,6 +45,11 @@ type Hook interface {
 	Drag(dx, dy float64) error
 	// SetImageBytes applies a PNG or JPEG as the character image.
 	SetImageBytes(data []byte) error
+	// SetCutout applies the cutout toggle, as the settings checkbox does.
+	SetCutout(on bool) error
+	// CaptureCharacter returns a PNG of the character image's active
+	// pixels.
+	CaptureCharacter() ([]byte, error)
 	// RequestFrame asks the pet window to draw another frame.
 	RequestFrame()
 	// CapturePage returns a PNG of what the pet window shows.
@@ -78,6 +85,15 @@ func artifactsDir() string {
 	return filepath.Join("artifacts", "e2e")
 }
 
+// colorShare is one 5-bit color bucket among a capture's opaque pixels:
+// its center and its share of those pixels.
+type colorShare struct {
+	R     uint8   `json:"r"`
+	G     uint8   `json:"g"`
+	B     uint8   `json:"b"`
+	Share float64 `json:"share"`
+}
+
 // captureStats is what GET /capture reports about a capture: where it was
 // written and what its pixels say about the window behind them.
 type captureStats struct {
@@ -89,6 +105,7 @@ type captureStats struct {
 	CornerAlphas   cornerAlphas `json:"cornerAlphas"`
 	CenterAlpha    uint8        `json:"centerAlpha"`
 	OpaqueBBox     *box         `json:"opaqueBBox"`
+	Colors         []colorShare `json:"colors"`
 }
 
 type cornerAlphas struct {
@@ -141,6 +158,8 @@ func Start(sock string, h Hook) error {
 	mux.HandleFunc("POST /offsets", s.offsets)
 	mux.HandleFunc("POST /drag", s.drag)
 	mux.HandleFunc("POST /image", s.image)
+	mux.HandleFunc("POST /cutout", s.cutout)
+	mux.HandleFunc("GET /character/capture", s.captureCharacter)
 	mux.HandleFunc("POST /frame", s.frame)
 	mux.HandleFunc("POST /reminder", s.reminder)
 	mux.HandleFunc("POST /settings/open", s.settingsOpen)
@@ -282,7 +301,8 @@ func (s *server) capture(name string, fn func() ([]byte, error)) (captureStats, 
 }
 
 // statsFor summarizes a capture: how much of it is transparent, the alpha
-// of its corners and center, and the box its visible pixels occupy.
+// of its corners and center, the box its visible pixels occupy, and the
+// largest color buckets among its opaque pixels.
 func statsFor(path string, size int, img image.Image) captureStats {
 	b := img.Bounds()
 	stats := captureStats{
@@ -298,13 +318,21 @@ func statsFor(path string, size int, img image.Image) captureStats {
 		CenterAlpha: alphaAt(img, b.Min.X+b.Dx()/2, b.Min.Y+b.Dy()/2),
 	}
 	transparent := 0
+	buckets := make(map[[3]uint8]int)
+	opaque := 0
 	minX, minY := b.Max.X, b.Max.Y
 	maxX, maxY := b.Min.X-1, b.Min.Y-1
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		for x := b.Min.X; x < b.Max.X; x++ {
-			if alphaAt(img, x, y) == 0 {
+			a := alphaAt(img, x, y)
+			if a == 0 {
 				transparent++
 				continue
+			}
+			if a >= 128 {
+				r, g, bl, _ := img.At(x, y).RGBA()
+				buckets[[3]uint8{uint8(r >> 11), uint8(g >> 11), uint8(bl >> 11)}]++
+				opaque++
 			}
 			if x < minX {
 				minX = x
@@ -329,7 +357,41 @@ func statsFor(path string, size int, img image.Image) captureStats {
 			Width: maxX - minX + 1, Height: maxY - minY + 1,
 		}
 	}
+	stats.Colors = topColors(buckets, opaque)
 	return stats
+}
+
+// topColors is the up to six largest 5-bit color buckets of the opaque
+// pixels, as their centers and their share of those pixels.
+func topColors(buckets map[[3]uint8]int, opaque int) []colorShare {
+	if opaque == 0 {
+		return nil
+	}
+	type counted struct {
+		color colorShare
+		n     int
+	}
+	all := make([]counted, 0, len(buckets))
+	for k, n := range buckets {
+		all = append(all, counted{
+			color: colorShare{
+				R:     k[0]<<3 | 4,
+				G:     k[1]<<3 | 4,
+				B:     k[2]<<3 | 4,
+				Share: float64(n) / float64(opaque),
+			},
+			n: n,
+		})
+	}
+	slices.SortFunc(all, func(i, j counted) int { return cmp.Compare(j.n, i.n) })
+	if len(all) > 6 {
+		all = all[:6]
+	}
+	out := make([]colorShare, len(all))
+	for i, c := range all {
+		out[i] = c.color
+	}
+	return out
 }
 
 // alphaAt is the pixel's alpha as 8 bits, whatever the image's color model.
@@ -413,6 +475,33 @@ func (s *server) image(w http.ResponseWriter, r *http.Request) {
 func (s *server) frame(w http.ResponseWriter, _ *http.Request) {
 	s.h.RequestFrame()
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *server) cutout(w http.ResponseWriter, r *http.Request) {
+	on, err := boolParam(r, "on")
+	if err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.h.SetCutout(on); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "on": on, "state": s.h.State()})
+}
+
+func (s *server) captureCharacter(w http.ResponseWriter, r *http.Request) {
+	name, err := captureName(r, "character")
+	if err != nil {
+		writeErrorStatus(w, http.StatusBadRequest, err)
+		return
+	}
+	stats, err := s.capture(name, s.h.CaptureCharacter)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, stats)
 }
 
 // reminderRequest is what POST /reminder takes: the rest reminder settings,

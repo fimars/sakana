@@ -164,6 +164,41 @@ print('%s %dx%d %d bytes' % (path, w, h, len(png)))
 PY
 }
 
+# make_sticker_png PATH SIZE draws an opaque 227,26,28 red frame with a
+# centered 40,80,200 blue disc of radius 0.45*SIZE, hard edge: a character
+# on a flat background, for the cutout.
+make_sticker_png() { # PATH SIZE
+  python3 - "$1" "$2" <<'PY'
+import struct, sys, zlib
+
+path, size = sys.argv[1], int(sys.argv[2])
+r = size * 0.45
+raw = bytearray()
+for y in range(size):
+    raw.append(0)  # filter: none
+    for x in range(size):
+        dx, dy = x - size / 2, y - size / 2
+        if dx * dx + dy * dy <= r * r:
+            raw += bytes((40, 80, 200, 255))
+        else:
+            raw += bytes((227, 26, 28, 255))
+
+
+def chunk(kind, data):
+    return (struct.pack('>I', len(data)) + kind + data +
+            struct.pack('>I', zlib.crc32(kind + data) & 0xffffffff))
+
+
+png = b'\x89PNG\r\n\x1a\n'
+png += chunk(b'IHDR', struct.pack('>IIBBBBB', size, size, 8, 6, 0, 0, 0))
+png += chunk(b'IDAT', zlib.compress(bytes(raw), 9))
+png += chunk(b'IEND', b'')
+with open(path, 'wb') as f:
+    f.write(png)
+print('%s %dx%d %d bytes' % (path, size, size, len(png)))
+PY
+}
+
 # ---------------------------------------------------------------- report ---
 
 write_report() {
@@ -228,6 +263,10 @@ reminder_final = load('state-reminder-final.json', {}) or {}
 reminder_loop = load('reminder-loop-state.json', {}) or {}
 reminder_still_up = load('reminder-still-up.json', {}) or {}
 settings_quit = load('settings-store-quit.json', {}) or {}
+cutout_on = load('state-cutout-on.json', {}) or {}
+char_off = load('character-off.json', {}) or {}
+char_cut = load('character-cutout.json', {}) or {}
+char_back = load('character-back.json', {}) or {}
 
 
 def g(obj, *path, default=None):
@@ -391,6 +430,23 @@ lines.append('| after 100×100 PNG | %s | %s |' % (
 lines.append('')
 lines.append('The 400×200 image keeps the 120 DIP image size (the shorter side is capped at 120), '
              'so the window does not resize; the 100×100 image does resize it.')
+lines.append('')
+
+lines.append('## Cutout')
+lines.append('')
+cut = g(cutout_on, 'cutout', default={}) or {}
+cbg = cut.get('background') or {}
+lines.append('| | value |')
+lines.append('|---|---|')
+lines.append('| sampled background | r=%s g=%s b=%s a=%s |' % (
+    fmt(cbg.get('r')), fmt(cbg.get('g')), fmt(cbg.get('b')), fmt(cbg.get('a'))))
+lines.append('| keyed share | %s |' % fmt(cut.get('removedFraction')))
+lines.append('| rim | %s px |' % fmt(cut.get('rim')))
+lines.append('| work size | %sx%s |' % (fmt(cut.get('workWidth')), fmt(cut.get('workHeight'))))
+lines.append('| output size | %sx%s |' % (fmt(cut.get('width')), fmt(cut.get('height'))))
+lines.append('| pipeline | %s ms |' % fmt(cut.get('durationMs')))
+lines.append('| captures | `%s`, `%s`, `%s` |' % (
+    char_off.get('path', 'n/a'), char_cut.get('path', 'n/a'), char_back.get('path', 'n/a')))
 lines.append('')
 
 lines.append('## Position offsets')
@@ -641,12 +697,13 @@ s = d["settings"]
 # as on, at 40 minutes of work and 10 of rest.
 want = {
     "alwaysOnTop": False, "screenLabel": "", "offsetX": 64, "offsetY": 64, "imagePath": "",
+    "cutout": False,
     "reminderEnabled": True, "reminderText": "休息了！",
     "reminderWorkMinutes": 40, "reminderRestMinutes": 10,
 }
 for key, value in want.items():
     assert s.get(key) == value, "settings.%s=%r, want %r" % (key, s.get(key), value)
-print("alwaysOnTop=false offsets=64,64 reminder=on 40/10 text=休息了！")
+print("alwaysOnTop=false offsets=64,64 cutout=false reminder=on 40/10 text=休息了！")
 PY
 
 check_py "bounds.matchMetrics" "$ART/state.json" <<'PY'
@@ -1013,6 +1070,98 @@ assert b["y"] + b["height"] == ob["y"] + ob["height"], \
 print("window resized %dx%d -> %dx%d; bottom edge and horizontal center kept" % (
     ob["width"], ob["height"], b["width"], b["height"]))
 PY
+
+step "cutout"
+make_sticker_png "$ART/sticker-400.png" 400
+request_ok "cutout.image" POST /image "$ART/image-sticker.json" \
+  -H 'Content-Type: image/png' --data-binary @"$ART/sticker-400.png" || true
+state_get "state.cutout.raw" "$ART/state-cutout-raw.json"
+request_ok "cutout.capture.off" GET "/character/capture?name=character-off" "$ART/character-off.json" || true
+
+check_py "cutout.off.state" "$ART/state-cutout-raw.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["settings"]["cutout"] is False, d["settings"]
+assert d["cutout"]["enabled"] is False, d["cutout"]
+print("cutout.enabled=false in state and settings")
+PY
+
+check_py "cutout.off.capture" "$ART/character-off.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+colors = d.get("colors") or []
+red = next((c for c in colors if c["r"] >= 200 and c["g"] < 100 and c["b"] < 100), None)
+assert red and red["share"] >= 0.3, "no red bucket >= 0.3 in %r" % (colors,)
+print("raw capture %dx%d: red bucket (%d,%d,%d) at share %.3f" % (
+    d["width"], d["height"], red["r"], red["g"], red["b"], red["share"]))
+PY
+
+request_ok "cutout.on" POST "/cutout?on=1" "$ART/cutout-on.json" || true
+state_get "state.cutout.on" "$ART/state-cutout-on.json"
+
+check_py "cutout.on.state" "$ART/state-cutout-on.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+c = d["cutout"]
+assert d["settings"]["cutout"] is True, d["settings"]
+assert c["enabled"] is True and c["keyed"] is True, c
+bg = c["background"]
+assert (bg["r"], bg["g"], bg["b"]) == (227, 26, 28), bg
+assert abs(c["removedFraction"] - 0.364) <= 0.02, \
+    "removedFraction=%r, want 0.364 +/- 0.02" % (c["removedFraction"],)
+assert c["rim"] == 12, "rim=%r, want 12" % (c["rim"],)
+assert c["workWidth"] == 400 and c["workHeight"] == 400, c
+assert c["width"] == 424 and c["height"] == 424, c
+assert c["durationMs"] >= 0, c
+print("keyed %.3f of the 400x400 image away, background %r, rim %d px, out %dx%d in %.1fms" % (
+    c["removedFraction"], bg, c["rim"], c["width"], c["height"], c["durationMs"]))
+PY
+
+request_ok "cutout.capture.cut" GET "/character/capture?name=character-cutout" "$ART/character-cutout.json" || true
+
+check_py "cutout.capture.cut" "$ART/character-cutout.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["width"] == 424 and d["height"] == 424, d
+for name, alpha in (d.get("cornerAlphas") or {}).items():
+    assert alpha == 0, "corner %s alpha=%r, want 0" % (name, alpha)
+colors = d.get("colors") or []
+red = [c for c in colors if c["r"] >= 200 and c["g"] < 100 and c["b"] < 100]
+assert all(c["share"] <= 0.02 for c in red), "red survives the cutout: %r" % (colors,)
+white = next((c for c in colors if c["r"] >= 240 and c["g"] >= 240 and c["b"] >= 240), None)
+assert white and white["share"] >= 0.08, "no near-white bucket >= 0.08 in %r" % (colors,)
+print("cutout capture %dx%d: white rim bucket (%d,%d,%d) at %.3f, no red" % (
+    d["width"], d["height"], white["r"], white["g"], white["b"], white["share"]))
+PY
+
+request_ok "cutout.reload" POST /settings/reload "$ART/reload-cutout.json" || true
+check_py "cutout.reload.state" "$ART/reload-cutout.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert d["after"]["cutout"] is True, d["after"]
+print("cutout=true persisted")
+PY
+
+request_ok "cutout.off" POST "/cutout?on=0" "$ART/cutout-off.json" || true
+state_get "state.cutout.off" "$ART/state-cutout-off.json"
+request_ok "cutout.capture.back" GET "/character/capture?name=character-back" "$ART/character-back.json" || true
+
+check_py "cutout.off.back" "$ART/state-cutout-off.json" "$ART/character-back.json" <<'PY'
+import json, sys
+state = json.load(open(sys.argv[1]))
+cap = json.load(open(sys.argv[2]))
+assert state["cutout"]["enabled"] is False, state["cutout"]
+assert state["settings"]["cutout"] is False, state["settings"]
+assert cap["width"] == 400 and cap["height"] == 400, cap
+colors = cap.get("colors") or []
+red = next((c for c in colors if c["r"] >= 200 and c["g"] < 100 and c["b"] < 100), None)
+assert red and red["share"] >= 0.3, "red not back at >= 0.3: %r" % (colors,)
+print("off again: the raw 400x400 image shows, red bucket at %.3f" % (red["share"],))
+PY
+
+# Leave the cutout on: the fixture stays as the character, and the later
+# pet and reminder checks do not read its pixels.
+request_ok "cutout.on.leave" POST "/cutout?on=1" "$ART/cutout-final.json" || true
 
 step "position offsets"
 request_ok "offsets.apply" POST "/offsets?x=100&y=140" "$ART/offsets.json" || true
