@@ -47,8 +47,9 @@ func (s *State) SetSize(size float64) {
 }
 
 // Step advances the spring by dt. MyGo may build a frame more than once,
-// with the same time: a zero dt steps not at all, so a frame moves the
-// spring once.
+// with the same time: a zero dt steps not at all. The widget calls Step
+// in fixed physicsStep slices, so one frame may advance the spring by
+// more than one step.
 func (s *State) Step(dt time.Duration) {
 	if dt <= 0 {
 		return

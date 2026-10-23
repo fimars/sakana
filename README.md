@@ -51,9 +51,10 @@ number, and the report is in integer milliseconds:
 tools/bench.sh
 ```
 
-On an M-series Mac a warm launch shows the pet in about 170 ms, a frame of the
-sway costs under a millisecond of CPU, and at rest the app draws no frame and
-uses no CPU. Numbers follow the machine and the display, so compare medians.
+On an M-series Mac a warm launch shows the pet in about 170 ms, the one-time
+greeting sway costs about a second of CPU over ten seconds, and at rest the app
+draws no frame and uses no CPU. Numbers follow the machine and the display, so
+compare medians.
 Artifact: `artifacts/bench/report.md`.
 
 ## Settings

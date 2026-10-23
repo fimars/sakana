@@ -63,8 +63,10 @@ delays the pet's appearance one-for-one.
 - A window whose content nothing shows has its frames held, and the display
   link is paused at rest: an occluded pet draws nothing and an idle app uses no
   CPU. The greeting sway runs once per launch (and per character change) and
-  takes about 10 s to come to rest at 100 fps; while it runs Mygo keeps the
-  frame it drew, so the app's footprint is higher until the pet rests.
+  takes about 10 s to come to rest; the spring steps at 100 Hz while the widget
+  draws at most 60 fps, so the sway costs about a third less CPU than drawing
+  at the display's 100–120 Hz. While it runs Mygo keeps the frame it drew, so
+  the app's footprint is higher until the pet rests.
 - A spring at rest is not stepped: its residual motion is below `Resting`'s
   threshold but stepping it from a redraw's frame would turn it back into a
   short swing. `Widget.View` only steps a spring that is still moving.

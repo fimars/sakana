@@ -14,12 +14,28 @@ var (
 	baseColor = ui.RGBA(128, 128, 128, 0.4)
 )
 
+const (
+	// physicsStep is the fixed simulation step: the spring coefficients
+	// are tuned for 100 Hz, and stepping in these slices keeps the same
+	// trajectory when the widget draws less often.
+	physicsStep = 10 * time.Millisecond
+
+	// renderInterval is the fastest the widget asks for another frame
+	// while the spring settles.
+	renderInterval = time.Second / 60
+
+	// maxCatchUp is the most physics slices one frame may run after a
+	// pause, so a long pause does not fast-forward the sway.
+	maxCatchUp = 3
+)
+
 // Widget draws the character on its rod over a transparent window, and
 // swings it as the pointer pulls.
 //
 // It is the Swift widget's SakanaWidgetView, its animator and its viewport
-// layout in one: View builds a frame from the spring's state, and the
-// spring steps by the time between frames.
+// layout in one: View builds a frame from the spring's state. While the
+// spring settles, View draws at most 60 fps and steps the spring in fixed
+// 100 Hz slices, so the sway's motion and its ~10 s duration stay the same.
 type Widget struct {
 	bitmap   *ui.Bitmap
 	metrics  Metrics
@@ -27,6 +43,8 @@ type Widget struct {
 	counters counters
 
 	last time.Time
+	// accum is unstepped time, drained in physicsStep slices by step.
+	accum time.Duration
 	// dragging is whether the pointer is pulling the character, and dragX
 	// and dragY how far it has pulled it from where the press began.
 	dragging     bool
@@ -63,6 +81,7 @@ func (w *Widget) SetBitmap(b *ui.Bitmap) {
 	w.state = NewState(size)
 	w.state.Kick()
 	w.last = time.Time{}
+	w.accum = 0
 	w.dragging = false
 	w.dragX, w.dragY = 0, 0
 }
@@ -106,6 +125,7 @@ func (w *Widget) View(c *ui.Context) {
 			// as SwiftUI's DragGesture translation did.
 			w.dragging = true
 			w.dragX, w.dragY = 0, 0
+			w.accum = 0
 		}
 		w.dragX += float64(dx)
 		w.dragY += float64(dy)
@@ -117,7 +137,7 @@ func (w *Widget) View(c *ui.Context) {
 		// otherwise step its last, imperceptible motion back into a sway.
 		w.dragging = false
 		if !w.state.Resting() {
-			w.state.Step(dt)
+			w.step(dt)
 		}
 	}
 
@@ -164,11 +184,36 @@ func (w *Widget) View(c *ui.Context) {
 		})
 	}
 
-	// Frames only while something moves: Mygo idles at 0 fps at rest.
-	if w.dragging || !w.state.Resting() {
+	// Frames only while something moves: Mygo idles at 0 fps at rest. A
+	// drag keeps the display rate for a responsive pull.
+	switch {
+	case w.dragging:
 		w.counters.active()
 		c.AnimationFrame()
-	} else {
+	case !w.state.Resting():
+		w.counters.active()
+		c.After(renderInterval)
+	default:
+		w.accum = 0
 		w.counters.idle(start)
+	}
+}
+
+// step advances the spring in fixed physicsStep slices, draining up to
+// maxCatchUp slices per frame.
+func (w *Widget) step(dt time.Duration) {
+	if dt <= 0 {
+		return
+	}
+	w.accum += dt
+	if w.accum > maxCatchUp*physicsStep {
+		w.accum = maxCatchUp * physicsStep
+	}
+	for w.accum >= physicsStep && !w.state.Resting() {
+		w.state.Step(physicsStep)
+		w.accum -= physicsStep
+	}
+	if w.state.Resting() {
+		w.accum = 0
 	}
 }
